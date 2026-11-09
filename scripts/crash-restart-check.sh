@@ -4,7 +4,6 @@
 set -u
 cd "$(dirname "$0")/.."
 app="$PWD/Glance.app"
-binary="$app/Contents/MacOS/Glance"
 domain=com.jethro.windowhop
 key=WindowHop.crashRestarts.v1
 
@@ -16,7 +15,7 @@ finish() {
 }
 fail() {
     print "::error::$1"
-    print "--- crash reports"
+    print -- "--- crash reports"
     ls -t ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i glance | head -5
     finish
     exit 1
@@ -31,27 +30,25 @@ wait_for_other() {
     done
     return 1
 }
-diagnostics() { "$binary" --diagnostics 2>&1 | tr -d ' \n' }
+# How many reopenings are on record. Read from the preferences: --diagnostics stays off until the user turns the
+# command line on, and this script should not change anyone's settings to get at it.
+recorded() { defaults read "$domain" "$key" 2>/dev/null | grep -c '[0-9]' }
 
 pkill -x Glance 2>/dev/null
 sleep 1
 defaults delete "$domain" "$key" 2>/dev/null
 
-print "1. It starts, and is ready to reopen."
+print "1. It starts and stays running."
 open -n "$app" || fail "open could not start the app"
 first=$(wait_for_other "" 20) || fail "the app did not start, or crashed while starting"
 sleep 4
 [[ "$(current)" == "$first" ]] || fail "the app did not stay running"
-report=$(diagnostics)
-print -- "${report[1,300]}"
-[[ "$report" == *'"armed":true'* ]] || fail "not armed: $report"
 
 print "2. A crash reopens it."
 kill -SEGV "$first"
 second=$(wait_for_other "$first" 15) || fail "no new copy after a crash"
 sleep 4
-report=$(diagnostics)
-[[ "$report" == *'"recent":1'* ]] || fail "the reopening was not recorded: $report"
+[[ "$(recorded)" == 1 ]] || fail "the reopening was not recorded: $(defaults read "$domain" "$key" 2>&1)"
 
 print "3. Being asked to quit does not."
 kill -TERM "$second"
@@ -68,6 +65,7 @@ sleep 4
 kill -SEGV "$fourth"
 fifth=$(wait_for_other "$fourth" 15) || fail "no new copy after the third crash"
 sleep 4
+[[ "$(recorded)" == 3 ]] || fail "three reopenings were not recorded: $(defaults read "$domain" "$key" 2>&1)"
 kill -SEGV "$fifth"
 sleep 8
 [[ -z "$(current)" ]] && print "   stayed closed" || fail "still reopening after three times in a row"
