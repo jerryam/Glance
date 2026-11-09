@@ -130,8 +130,16 @@ final class WindowEngine: ObservableObject {
     private var appHistory: [Int32: TimeInterval] = [:]
     private var lastTracked = ""
     private var firstSeen: [String: TimeInterval] = [:]
+    /// Subscribing to an app and reading its focused window can each wait for that app, and the app may not be
+    /// answering. Both happen on this thread, whose run loop also delivers the notifications.
+    private let axThread = BackgroundRunLoop(name: "Glance.accessibility", qos: .userInitiated)
+    // Only touched on axThread.
     private var axObservers: [Int32: AXObserver] = [:]
     private var watchedWindows: [Int32: [AXUIElement]] = [:]
+    private var knownPIDs = Set<Int32>()
+    private var readingFocus = false
+    private var focusAgain = false
+    private(set) var observedWindowCount = 0
     private(set) var observerEventCounts: [String: Int] = [:]
     private(set) var suppressedSurfaceCount = 0
     private(set) var unavailableWindowListCount = 0
@@ -141,7 +149,8 @@ final class WindowEngine: ObservableObject {
     private var cacheEventsRead = 0
     private var cacheReadAt: TimeInterval = -1_000
     /// Something has happened that the cached list cannot know about, whether or not a refresh is on its way.
-    var cacheStale: Bool { cacheEvents != cacheEventsRead }
+    /// That includes a focus change still being read: until then the list's order does not know about it.
+    var cacheStale: Bool { cacheEvents != cacheEventsRead || readingFocus }
     var cacheAge: TimeInterval { ProcessInfo.processInfo.systemUptime - cacheReadAt }
     private var pendingTitles = ChangeBatch<AXUIElement>()
     /// How long one refresh waits for every app. A hung app answers "cannot complete" within its own 0.2 second
@@ -159,7 +168,6 @@ final class WindowEngine: ObservableObject {
     /// Scanning every window for tab groups costs dozens of accessibility calls; only done when a
     /// switching scheme shows tabs separately.
     var scanTabs = false
-    var observedWindowCount: Int { watchedWindows.values.reduce(0) { $0 + $1.count } }
     var suspendTracking = false
     private var activationObserver: NSObjectProtocol?
 
@@ -169,10 +177,10 @@ final class WindowEngine: ObservableObject {
             if !self.suspendTracking && app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
                 self.appHistory[app.processIdentifier] = Date.timeIntervalSinceReferenceDate
             }
-            let previous = self.lastForeground
             self.watchApplications()
             self.trackFocus()
-            if self.lastForeground == previous { self.onForegroundChange?() }
+            // The focused window's answer comes later, and reports again if it changes anything.
+            self.onForegroundChange?()
         }
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification,
                      NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification,
@@ -192,7 +200,7 @@ final class WindowEngine: ObservableObject {
         focusDebounce?.cancel()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
-        axObservers.values.forEach { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource($0), .commonModes) }
+        axThread.finish()
     }
     func refreshObservers() { watchApplications(); trackFocus() }
     private func markCacheStale() { cacheEvents += 1; onCacheStale?() }
@@ -200,12 +208,34 @@ final class WindowEngine: ObservableObject {
     // would wake the main thread at every step for nothing.
     private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXTitleChangedNotification,
         kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    /// On axThread.
     private func watchWindow(_ window: AXUIElement, pid: Int32) {
         guard let observer = axObservers[pid], !(watchedWindows[pid] ?? []).contains(where: { CFEqual($0, window) }) else { return }
         for name in Self.windowNotifications {
             _ = AXObserverAddNotification(observer, window, name as CFString, Unmanaged.passUnretained(self).toOpaque())
         }
         watchedWindows[pid, default: []].append(window)
+    }
+    /// On axThread.
+    private func publishObservedCount() {
+        let count = watchedWindows.values.reduce(0) { $0 + $1.count }
+        DispatchQueue.main.async { [weak self] in self?.observedWindowCount = count }
+    }
+    /// On axThread: window subscriptions follow the list that was just read.
+    private func syncWatchedWindows(_ handles: [WindowHandle]) {
+        for handle in handles {
+            if let ax = handle.ax { watchWindow(ax, pid: handle.descriptor.pid) }
+        }
+        for pid in Array(watchedWindows.keys) {
+            let valid = handles.filter { $0.descriptor.pid == pid }.compactMap(\.ax)
+            guard let observer = axObservers[pid] else { continue }
+            let removed = (watchedWindows[pid] ?? []).filter { window in !valid.contains(where: { CFEqual($0, window) }) }
+            for window in removed {
+                for name in Self.windowNotifications { _ = AXObserverRemoveNotification(observer, window, name as CFString) }
+            }
+            watchedWindows[pid]?.removeAll { window in removed.contains(where: { CFEqual($0, window) }) }
+        }
+        publishObservedCount()
     }
     private func windowEvent(_ window: AXUIElement, notification: String) {
         observerEventCounts[notification, default: 0] += 1
@@ -219,7 +249,11 @@ final class WindowEngine: ObservableObject {
         }
         if notification == kAXUIElementDestroyedNotification {
             windows.removeAll { handle in handle.ax.map { CFEqual($0, window) } == true }
-            for pid in Array(watchedWindows.keys) { watchedWindows[pid]?.removeAll { CFEqual($0, window) } }
+            axThread.perform { [weak self] in
+                guard let self else { return }
+                for pid in Array(self.watchedWindows.keys) { self.watchedWindows[pid]?.removeAll { CFEqual($0, window) } }
+                self.publishObservedCount()
+            }
         }
         focusDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.trackFocus() }
@@ -231,12 +265,20 @@ final class WindowEngine: ObservableObject {
     /// At most ten times a second, whatever the windows do: only those entries change, in one go.
     private func flushTitles() {
         let pending = pendingTitles.flush()
+        guard suspendTracking, !pending.isEmpty else { return }
+        axThread.perform { [weak self] in
+            let titles: [(window: AXUIElement, title: String)] = pending.compactMap { window in
+                AXUIElementSetMessagingTimeout(window, 0.1)
+                return (axAttribute(window, kAXTitleAttribute) as? String).map { (window: window, title: $0) }
+            }
+            DispatchQueue.main.async { [weak self] in self?.applyTitles(titles) }
+        }
+    }
+    private func applyTitles(_ titles: [(window: AXUIElement, title: String)]) {
         guard suspendTracking else { return }
         var changes: [String: String] = [:]
-        for window in pending {
-            AXUIElementSetMessagingTimeout(window, 0.1)
-            guard let title = axAttribute(window, kAXTitleAttribute) as? String,
-                  let index = windows.firstIndex(where: { $0.tab == nil && $0.ax.map { CFEqual($0, window) } == true }) else { continue }
+        for (window, title) in titles {
+            guard let index = windows.firstIndex(where: { $0.tab == nil && $0.ax.map { CFEqual($0, window) } == true }) else { continue }
             var descriptor = windows[index].descriptor
             guard descriptor.title != title else { continue }
             descriptor.title = title
@@ -249,21 +291,28 @@ final class WindowEngine: ObservableObject {
         guard AXIsProcessTrusted() else { return }
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
         let pids = Set(apps.map(\.processIdentifier))
-        for pid in Array(axObservers.keys) where !pids.contains(pid) {
-            if let observer = axObservers.removeValue(forKey: pid) { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes) }
-            watchedWindows.removeValue(forKey: pid)
+        for pid in knownPIDs.subtracting(pids) {
             focusHistory = focusHistory.filter { key, _ in !key.hasPrefix("\(pid)|") }
             appHistory.removeValue(forKey: pid)
         }
-        for app in apps where axObservers[app.processIdentifier] == nil {
+        knownPIDs = pids
+        axThread.perform { [weak self] in self?.syncObservers(pids) }
+    }
+    /// On axThread.
+    private func syncObservers(_ pids: Set<Int32>) {
+        for pid in Array(axObservers.keys) where !pids.contains(pid) {
+            if let observer = axObservers.removeValue(forKey: pid) { axThread.remove(AXObserverGetRunLoopSource(observer)) }
+            watchedWindows.removeValue(forKey: pid)
+        }
+        for pid in pids where axObservers[pid] == nil {
             var observer: AXObserver?
-            guard AXObserverCreate(app.processIdentifier, { _, element, name, context in
+            guard AXObserverCreate(pid, { _, element, name, context in
                 guard let context else { return }
                 let engine = Unmanaged<WindowEngine>.fromOpaque(context).takeUnretainedValue()
                 let notification = name as String
                 DispatchQueue.main.async { [weak engine] in engine?.windowEvent(element, notification: notification) }
             }, &observer) == .success, let observer else { continue }
-            let element = AXUIElementCreateApplication(app.processIdentifier)
+            let element = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(element, 0.15)
             // Some apps only deliver descendant-window notifications through the application element.
             // Keep direct window subscriptions as a fallback for apps with narrower notification support.
@@ -271,40 +320,59 @@ final class WindowEngine: ObservableObject {
                          kAXWindowCreatedNotification, kAXApplicationActivatedNotification] + Self.windowNotifications {
                 _ = AXObserverAddNotification(observer, element, name as CFString, Unmanaged.passUnretained(self).toOpaque())
             }
-            axObservers[app.processIdentifier] = observer
-            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+            axObservers[pid] = observer
+            axThread.add(AXObserverGetRunLoopSource(observer))
         }
+        publishObservedCount()
     }
+    /// Answered from the last read of the focused window, because a shortcut must not wait for the app in front.
+    /// Every change of that answer reaches `onForegroundChange`, which applies this again.
     func shortcutsIgnored(_ rules: [AppException]) -> Bool {
         guard let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
         let rules = rules.filter { $0.matches(bundle: app.bundleIdentifier ?? "") }
         if rules.contains(where: { $0.ignore == .always }) { return true }
         guard rules.contains(where: { $0.ignore == .fullscreen }), AXIsProcessTrusted() else { return false }
-        let ax = AXUIElementCreateApplication(app.processIdentifier); AXUIElementSetMessagingTimeout(ax, 0.10)
-        guard let focused = axAttribute(ax, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
-        AXUIElementSetMessagingTimeout(focused as! AXUIElement, 0.10)
-        return (axAttribute(focused as! AXUIElement, "AXFullScreen") as? NSNumber)?.boolValue == true
+        return lastForeground == "\(app.processIdentifier):true"
     }
+    /// One read at a time, plus one more if anything happened meanwhile: an app that answers slowly cannot build up a queue.
     private func trackFocus() {
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
-        let element = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(element, 0.15)
-        guard let focused = axAttribute(element, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else {
-            let foreground = "\(app.processIdentifier):false"
-            if foreground != lastForeground { lastForeground = foreground; onForegroundChange?() }
-            return
+        guard !readingFocus else { focusAgain = true; return }
+        readingFocus = true
+        let pid = app.processIdentifier
+        // Whether this focus change counts is settled now. It may have happened just before the panel opened
+        // and still be read after, and belongs in the history all the same.
+        let frozen = suspendTracking
+        axThread.perform { [weak self] in
+            guard let self else { return }
+            let reading = self.readFocus(pid)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.readingFocus = false
+                self.applyFocus(pid: pid, key: reading.key, fullscreen: reading.fullscreen, frozen: frozen)
+                if self.focusAgain { self.focusAgain = false; self.trackFocus() }
+            }
         }
+    }
+    /// On axThread.
+    private func readFocus(_ pid: Int32) -> (key: String?, fullscreen: Bool) {
+        let element = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(element, 0.15)
+        guard let focused = axAttribute(element, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return (nil, false) }
         let window = focused as! AXUIElement
         AXUIElementSetMessagingTimeout(window, 0.15)
         let title = axAttribute(window, kAXTitleAttribute) as? String ?? ""
-        watchWindow(window, pid: app.processIdentifier)
-        let key = NativeBridge.windowID(window).map { "cg:\($0)" } ?? "\(app.processIdentifier)|\(title)"
-        let full = (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false
-        let foreground = "\(app.processIdentifier):\(full)"
+        watchWindow(window, pid: pid)
+        publishObservedCount()
+        let key = NativeBridge.windowID(window).map { "cg:\($0)" } ?? "\(pid)|\(title)"
+        return (key, (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false)
+    }
+    private func applyFocus(pid: Int32, key: String?, fullscreen: Bool, frozen: Bool) {
+        let foreground = "\(pid):\(fullscreen)"
         if foreground != lastForeground { lastForeground = foreground; onForegroundChange?() }
         // Freeze MRU while selecting, but continue detecting remote fullscreen changes.
-        guard !suspendTracking else { return }
+        guard let key, !frozen else { return }
         guard key != lastTracked else { return }
         lastTracked = key
         focusHistory[key] = Date.timeIntervalSinceReferenceDate
@@ -334,9 +402,13 @@ final class WindowEngine: ObservableObject {
         guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
         let before = Set(windows.filter { $0.descriptor.pid == pid }.map(\.id))
         windows = windows.filter { $0.descriptor.pid != pid } + handles
-        for handle in handles {
-            if firstSeen[handle.id] == nil { firstSeen[handle.id] = handle.descriptor.created }
-            if let ax = handle.ax { watchWindow(ax, pid: pid) }
+        for handle in handles where firstSeen[handle.id] == nil { firstSeen[handle.id] = handle.descriptor.created }
+        axThread.perform { [weak self] in
+            guard let self else { return }
+            for handle in handles {
+                if let ax = handle.ax { self.watchWindow(ax, pid: pid) }
+            }
+            self.publishObservedCount()
         }
         if before != Set(handles.map(\.id)) { onWindowsChange?() }
     }
@@ -515,18 +587,7 @@ final class WindowEngine: ObservableObject {
                 self.watchApplications()
                 let validIDs = Set(result.map(\.id))
                 self.focusHistory = self.focusHistory.filter { validIDs.contains($0.key) || !$0.key.hasPrefix("cg:") }
-                for handle in result {
-                    if let ax = handle.ax { self.watchWindow(ax, pid: handle.descriptor.pid) }
-                }
-                for pid in Array(self.watchedWindows.keys) {
-                    let valid = result.filter { $0.descriptor.pid == pid }.compactMap(\.ax)
-                    guard let observer = self.axObservers[pid] else { continue }
-                    let removed = (self.watchedWindows[pid] ?? []).filter { window in !valid.contains(where: { CFEqual($0, window) }) }
-                    for window in removed {
-                        for name in Self.windowNotifications { _ = AXObserverRemoveNotification(observer, window, name as CFString) }
-                    }
-                    self.watchedWindows[pid]?.removeAll { window in removed.contains(where: { CFEqual($0, window) }) }
-                }
+                self.axThread.perform { [weak self] in self?.syncWatchedWindows(result) }
                 RuntimeDiagnostics.shared.record("enumeration", since: start)
                 let callbacks = self.refreshRequests.finish(upTo: request)
                 self.refreshing = false
@@ -670,6 +731,21 @@ enum WindowAction { case focus, close, minimize, fullscreen, quitApp, hideApp, t
 enum WindowControl {
     /// 设置 › 通用 › 切换窗口的方式. The window-server path falls back automatically when unavailable.
     static var preferWindowServer = true
+    /// Window actions run one at a time, apart from window listing, so neither waits for the other.
+    private static let actionQueue = DispatchQueue(label: "Glance.windowActions", qos: .userInteractive)
+    /// The same as `perform`, for the main thread to use when it should not wait for the app. The answer arrives on the main queue.
+    static func performInBackground(_ action: WindowAction, on handle: WindowHandle, completion: @escaping (String?) -> Void) {
+        let screens = screenAreas()
+        actionQueue.async {
+            let error = perform(action, on: handle, screens: screens)
+            DispatchQueue.main.async { completion(error) }
+        }
+    }
+    /// Only the main thread may give up activation. It never waits for the action queue, so this cannot deadlock.
+    private static func yieldActivation(to app: NSRunningApplication) {
+        if Thread.isMainThread { NSApp.yieldActivation(to: app) }
+        else { DispatchQueue.main.sync { NSApp.yieldActivation(to: app) } }
+    }
     static func element(for handle: WindowHandle) -> AXUIElement? {
         if let ax = handle.ax { return ax }
         let app = AXUIElementCreateApplication(handle.descriptor.pid); AXUIElementSetMessagingTimeout(app, 0.2)
@@ -689,7 +765,8 @@ enum WindowControl {
             completion(switched ? nil : "无法切换到这个标签页：它可能已经关闭，或浏览器没有回应。可以重新搜索后再试。")
         }
     }
-    static func perform(_ action: WindowAction, on handle: WindowHandle) -> String? {
+    /// `screens` must be passed off the main thread, which is the only place the screens can be read.
+    static func perform(_ action: WindowAction, on handle: WindowHandle, screens: [WindowRect]? = nil) -> String? {
         guard let app = NSRunningApplication(processIdentifier: handle.descriptor.pid) else { return "这个窗口已经关闭。" }
         if action == .quitApp { return app.terminate() ? nil : "应用未接受退出请求，请在应用中确认未保存的内容。" }
         if action == .hideApp { return (app.isHidden ? app.unhide() : app.hide()) ? nil : "应用没有接受隐藏或显示请求。" }
@@ -702,7 +779,7 @@ enum WindowControl {
             if !handle.descriptor.windowless && ax == nil { return "这个窗口已关闭或暂时不可切换，请重新选择。" }
             app.unhide()
             if handle.descriptor.windowless, let url = app.bundleURL {
-                NSApp.yieldActivation(to: app)
+                yieldActivation(to: app)
                 return NSWorkspace.shared.open(url) ? nil : "暂时无法重新打开这个应用。"
             }
             if let tab = handle.tab {
@@ -719,7 +796,7 @@ enum WindowControl {
                 if let ax { _ = AXUIElementPerformAction(ax, kAXRaiseAction as CFString) }
                 return nil
             }
-            NSApp.yieldActivation(to: app)
+            yieldActivation(to: app)
             if let ax {
                 let appAX = AXUIElementCreateApplication(handle.descriptor.pid)
                 AXUIElementSetMessagingTimeout(appAX, 0.15)
@@ -748,10 +825,10 @@ enum WindowControl {
             let full = (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue ?? false
             result = AXUIElementSetAttributeValue(ax, "AXFullScreen" as CFString, full ? kCFBooleanFalse : kCFBooleanTrue)
         case .quitApp, .hideApp: return nil
-        case .tileLeft: return arrange(ax, .left)
-        case .tileRight: return arrange(ax, .right)
-        case .maximize: return arrange(ax, .maximize)
-        case .nextScreen: return arrange(ax, .nextScreen)
+        case .tileLeft: return arrange(ax, .left, screens: screens)
+        case .tileRight: return arrange(ax, .right, screens: screens)
+        case .maximize: return arrange(ax, .maximize, screens: screens)
+        case .nextScreen: return arrange(ax, .nextScreen, screens: screens)
         }
         return result == .success ? nil : "该应用暂不支持这个窗口操作（\(result.rawValue)）。"
     }
@@ -764,11 +841,11 @@ enum WindowControl {
             return WindowRect(x: Double(area.minX), y: Double(primaryHeight - area.maxY), width: Double(area.width), height: Double(area.height))
         }
     }
-    private static func arrange(_ ax: AXUIElement, _ kind: WindowArrangement.Kind) -> String? {
+    private static func arrange(_ ax: AXUIElement, _ kind: WindowArrangement.Kind, screens: [WindowRect]?) -> String? {
         if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
         guard let frame = axFrame(ax) else { return "暂时读不到这个窗口的位置。" }
         let current = WindowRect(x: Double(frame.minX), y: Double(frame.minY), width: Double(frame.width), height: Double(frame.height))
-        guard let target = WindowArrangement.frame(kind, window: current, screens: screenAreas()) else {
+        guard let target = WindowArrangement.frame(kind, window: current, screens: screens ?? screenAreas()) else {
             return kind == .nextScreen ? "只有一块屏幕，无法移到下一块屏幕。" : "没有找到可用的屏幕。"
         }
         var origin = CGPoint(x: target.x, y: target.y)

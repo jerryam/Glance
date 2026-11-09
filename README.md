@@ -1,4 +1,4 @@
-# 一瞥 · Glance 2.3.3
+# 一瞥 · Glance 2.4.0
 
 看一眼，就到了。为你的 Mac 制作的原生窗口切换器，适用于 Apple Silicon、macOS 14 及以上。无需账号，没有应用内网络请求或遥测。
 
@@ -139,7 +139,9 @@ VoiceOver 焦点跟随选中窗口，提供位置、数量和最小化、全屏�
 
 ## 源码与构建
 
-`Sources/` 是完整源码，`Tests/CoreTests.swift` 的三百九十六项检查覆盖未打开的应用与设置页的搜索和排序、Dock 预览设置、菜单栏图标的分组与允许列表、搜索、匹配高亮、筛选、排序、分组、例外、配置迁移与修复、导入导出、方案命名与新建、面板输入、连续触发与松键逻辑、独立手势、活动定时器、窗口资格和残留过滤、置顶与按应用分组、浏览器标签页筛选、窗口整理、流式卡片布局、面板尺寸、具体设置查找与三种布局。`AppDelegate` 只负责面板会话，预览在 `AppDelegate+Preview.swift`，拖放、角标、置顶、标签页等在 `AppDelegate+Features.swift` 与 `SystemIntegration.swift`；界面在 `SwitcherUI.swift`、`SettingsUI.swift`，配色在 `DesignSystem.swift`；菜单栏图标的规则在 `MenuBarCore.swift`，读取、隐藏和显示在 `MenuBarController.swift`，设置页在 `MenuBarSettingsUI.swift`；Dock 预览在 `DockPreview.swift` 与 `AppDelegate+DockPreview.swift`，可打开的应用和设置页在 `Launcher.swift`。macOS 26 起的液态玻璃图标是 `Resources/AppIcon.icon`（Icon Composer 格式：`icon.json` 加分层 SVG），旧系统用的平面图标由 `Resources/Icon.swift` 在编译时绘制；琥珀色强调色在 `Resources/Assets.xcassets`。使用 Swift、AppKit、SwiftUI、ScreenCaptureKit 和系统辅助功能接口，无第三方依赖。
+`Sources/` 是完整源码，`Tests/CoreTests.swift` 的四百一十九项检查覆盖未打开的应用与设置页的搜索和排序、Dock 预览设置、菜单栏图标的分组与允许列表、搜索、匹配高亮、筛选、排序、分组、例外、配置迁移与修复、导入导出、方案命名与新建、面板输入、连续触发与松键逻辑、独立手势、活动定时器、窗口资格和残留过滤、置顶与按应用分组、浏览器标签页筛选、窗口整理、流式卡片布局、面板尺寸、具体设置查找与三种布局。`AppDelegate` 只负责面板会话，预览在 `AppDelegate+Preview.swift`，拖放、角标、置顶、标签页等在 `AppDelegate+Features.swift` 与 `SystemIntegration.swift`；界面在 `SwitcherUI.swift`、`SettingsUI.swift`，配色在 `DesignSystem.swift`；菜单栏图标的规则在 `MenuBarCore.swift`，读取、隐藏和显示在 `MenuBarController.swift`，设置页在 `MenuBarSettingsUI.swift`；Dock 预览在 `DockPreview.swift` 与 `AppDelegate+DockPreview.swift`，可打开的应用和设置页在 `Launcher.swift`。macOS 26 起的液态玻璃图标是 `Resources/AppIcon.icon`（Icon Composer 格式：`icon.json` 加分层 SVG），旧系统用的平面图标由 `Resources/Icon.swift` 在编译时绘制；琥珀色强调色在 `Resources/Assets.xcassets`。使用 Swift、AppKit、SwiftUI、ScreenCaptureKit 和系统辅助功能接口，无第三方依赖。
+
+主线程不等其他应用：面板的按键拦截在自己的线程上，按主线程最近公布的状态回答（`PanelInputMonitor.swift`）；应用和窗口的通知、当前窗口的读取在 `WindowEngine` 的辅助功能线程上；切换和窗口操作在 `WindowControl` 的动作队列上。主线程不同步等待它们，反过来只有让出前台（`NSApp.yieldActivation`）这一步由动作队列同步等主线程。手势拦截和 Dock 预览仍在主线程。
 
 `Tests/SearchBenchmark.swift` 可独立编译测量三十至六百个模拟窗口的筛选耗时；测量边界与结果见验证记录。
 

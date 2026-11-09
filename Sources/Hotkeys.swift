@@ -68,9 +68,8 @@ final class HotkeyRegistry {
         guard suspended != value else { return }
         suspended = value; rebuild()
     }
-    func matchesRegisteredTrigger(_ event: NSEvent) -> Bool {
-        !suspended && profiles.contains { GlobalShortcutMatch.matches(code: UInt32(event.keyCode), flags: ShortcutModifiers(eventFlags: event.modifierFlags), profile: $0) }
-    }
+    /// The switching shortcuts the system is delivering right now.
+    var activeTriggers: [ShortcutProfile] { suspended ? [] : profiles }
     @discardableResult func handleModifiers(previous: ShortcutModifiers, current: ShortcutModifiers) -> Bool {
         guard !suspended, previous != current, !current.subtracting(previous).isEmpty else { return false }
         for profile in profiles where profile.enabled && profile.keyCode == KeyChoice.modifierOnly {

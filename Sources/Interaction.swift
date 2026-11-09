@@ -648,3 +648,67 @@ final class RuntimeDiagnostics {
     }
     var summary: [String: [String: Double]] { timings.mapValues(\.summary) }
 }
+
+/// What to do when bringing a window forward failed. A pick from the cached list may only be out of date, so the
+/// fresh list gets the final say, once; a pick from the fresh list has nothing further to go on.
+enum FocusFailurePolicy {
+    enum Action { case waitForFreshList, commitFreshList, report }
+    static func action(fromCache: Bool, loading: Bool) -> Action {
+        guard fromCache else { return .report }
+        return loading ? .waitForFreshList : .commitFreshList
+    }
+}
+
+/// A thread that only runs a run loop, for event sources whose callbacks must not wait for the main thread.
+final class BackgroundRunLoop: Thread {
+    private let ready = DispatchSemaphore(value: 0)
+    private var loop: CFRunLoop!
+
+    init(name: String, qos: QualityOfService) {
+        super.init()
+        self.name = name
+        qualityOfService = qos
+        start()
+        ready.wait()
+    }
+    override func main() {
+        loop = CFRunLoopGetCurrent()
+        // A run loop with nothing to wait for returns at once.
+        let keepAlive = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0) { _ in }
+        CFRunLoopAddTimer(loop, keepAlive, .commonModes)
+        ready.signal()
+        CFRunLoopRun()
+    }
+    /// Runs after whatever was asked for earlier. Nothing drains autoreleased objects on this thread otherwise.
+    func perform(_ work: @escaping () -> Void) {
+        CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue) { autoreleasepool(invoking: work) }
+        CFRunLoopWakeUp(loop)
+    }
+    func add(_ source: CFRunLoopSource) { CFRunLoopAddSource(loop, source, .commonModes) }
+    func remove(_ source: CFRunLoopSource) { CFRunLoopRemoveSource(loop, source, .commonModes) }
+    func finish() { CFRunLoopStop(loop) }
+}
+
+/// What the panel's key tap decides from, on its own thread: a copy the main thread publishes whenever it runs
+/// out of work, so that a key gets its answer at once even while the main thread is busy.
+struct PanelKeySnapshot {
+    var generation = 0
+    var held: ShortcutModifiers = []
+    var sticky = false
+    var searching = false
+    var bindings: [PanelBinding] = []
+    var mode = PanelInputMode.traditional
+    var panelIsKey = false
+    var markedText = false
+    /// A window is coming forward and the panel is on its way out, so keys go through to that window.
+    var focusInFlight = false
+    /// The shortcuts registered with the system right now. Those keys arrive by that path and are not the tap's to take.
+    var triggers: [ShortcutProfile] = []
+
+    func captures(code: UInt32, flags: ShortcutModifiers) -> Bool {
+        guard !focusInFlight else { return false }
+        let command = PanelInputPolicy.command(code: code, flags: flags, held: held, sticky: sticky, searching: searching, bindings: bindings, mode: mode)
+        return PanelKeyCapturePolicy.captures(command: command, panelIsKey: panelIsKey, searching: searching, markedText: markedText,
+                                              registeredTrigger: triggers.contains { GlobalShortcutMatch.matches(code: code, flags: flags, profile: $0) })
+    }
+}

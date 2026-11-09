@@ -59,6 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var modifierRepeatGeneration = 0
     var sleeping = false
     var panelRefreshing = false
+    /// A window is being brought forward on the action queue. Until it answers, the panel is on its way out:
+    /// a second release or Return must not start another, and keys belong to that window.
+    var focusInFlight = false
+    /// The panel's show delay ran out during a switch, so it stayed hidden. It appears only if the switch fails.
+    var panelOrderDeferred = false
+    /// A press of a shortcut during a switch, for the panel that comes after it.
+    var triggerAfterFocus: (index: Int, reverse: Bool)?
     var gestureActive = false
     var recording = false
     var commandServer: WindowCommandServer?
@@ -152,31 +159,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             self.menuBar.pausedForFullscreen = self.frontFullscreen.active
             self.syncActivityTimers()
+            // A read that timed out said "not full screen", and the "ignore when full screen" rule goes by the last read.
+            self.engine.refreshObservers()
         }
         frontFullscreen.look()
-        panelInput.shouldCapture = { [weak self] event in
-            guard let self, self.showing else { return false }
-            let marked = (self.panel.firstResponder as? NSTextView)?.hasMarkedText() ?? false
-            let command = PanelInputPolicy.command(code: UInt32(event.keyCode), flags: ShortcutModifiers(eventFlags: event.modifierFlags),
-                held: self.heldTriggerModifiers, sticky: self.state.sticky, searching: self.state.searchVisible,
-                bindings: self.state.settings.advanced.bindings, mode: self.state.settings.advanced.inputMode)
-            return PanelKeyCapturePolicy.captures(command: command, panelIsKey: self.panel.isKeyWindow,
-                searching: self.state.searchVisible, markedText: marked, registeredTrigger: self.hotkeys.matchesRegisteredTrigger(event))
+        panelInput.currentState = { [weak self] in
+            guard let self else { return PanelKeySnapshot() }
+            return PanelKeySnapshot(generation: self.showGeneration, held: self.heldTriggerModifiers, sticky: self.state.sticky, searching: self.state.searchVisible,
+                bindings: self.state.settings.advanced.bindings, mode: self.state.settings.advanced.inputMode, panelIsKey: self.panel.isKeyWindow,
+                markedText: (self.panel.firstResponder as? NSTextView)?.hasMarkedText() ?? false, focusInFlight: self.focusInFlight,
+                triggers: self.hotkeys.activeTriggers)
         }
-        panelInput.onKey = { [weak self] event in
-            guard let self else { return }; let generation = self.showGeneration
-            // Keep AX work and window switching outside the event-tap callback.
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.showing, self.showGeneration == generation else { return }
-                _ = self.handleKey(event)
-            }
+        panelInput.onKey = { [weak self] event, generation in
+            guard let self, self.showing, self.showGeneration == generation, let native = NSEvent(cgEvent: event) else { return }
+            _ = self.handleKey(native)
         }
-        panelInput.onModifiers = { [weak self] flags in
-            guard let self else { return }; let generation = self.showGeneration
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.showing, self.showGeneration == generation else { return }
-                self.inputModifiers(flags)
-            }
+        panelInput.onModifiers = { [weak self] flags, generation in
+            guard let self, self.showing, self.showGeneration == generation else { return }
+            self.inputModifiers(flags)
         }
         engine.onForegroundChange = { [weak self] in self?.updateHotkeyGate() }
         engine.onWindowsChange = { [weak self] in self?.schedulePanelRefresh() }
@@ -563,6 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func trigger(index: Int, reverse: Bool) {
         guard let profile = settings.value.shortcuts.first(where: { $0.id == index && $0.enabled }) else { return }
         OnboardingProgress.shared.markTried()
+        if focusInFlight { triggerAfterFocus = (index: index, reverse: reverse); return }
         heldTriggerModifiers = profile.modifiers
         if showing && state.profile.id == index && !state.isDemo {
             pendingCommit = PendingReleasePolicy.keepPendingCommit(previous: pendingCommit, triggerPressed: true, triggerHeld: true)
@@ -616,7 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // A bare function key has no modifier to release, so its panel stays until Return, Esc or a click.
         state.sticky = startSearching || profile.usesBareKey || (state.settings.advanced.voiceOverKeepsOpen && NSWorkspace.shared.isVoiceOverEnabled)
         state.setVisiblePreviews([])
-        state.actionPending = false; panelRefreshing = false
+        state.actionPending = false; panelRefreshing = false; focusInFlight = false; panelOrderDeferred = false; triggerAfterFocus = nil
         state.loading = true; state.refilter(reset: true)
         let usedCache = !state.items.isEmpty
         if usedCache && !startSearching { state.selectedIndex = WindowNavigation.linear(index: 0, count: state.items.count, step: initialStep) }
@@ -631,9 +632,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if startSearching { loadBrowserTabsIfNeeded() }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(state.settings.advanced.showDelay)) { [weak self] in
             guard let self, self.showing, self.showGeneration == generation else { return }
-            self.panel.makeKeyAndOrderFront(nil); self.panel.orderFrontRegardless()
-            RuntimeDiagnostics.shared.record("panel_ordered", since: self.showStarted)
-            if !self.state.searchVisible { self.panel.makeFirstResponder(nil) }
+            // Already released and switching: showing the panel now would only make it flash.
+            if self.focusInFlight { self.panelOrderDeferred = true; return }
+            self.orderPanelFront()
             self.modifiersChanged(Self.logicalModifierFlags)
         }
         engine.refresh(frontPID: state.frontPID) { [weak self] handles in
@@ -664,6 +665,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.preparePreviews(handles)
             self.updateAutomaticPreview()
         }
+    }
+    private func orderPanelFront() {
+        panel.makeKeyAndOrderFront(nil); panel.orderFrontRegardless()
+        RuntimeDiagnostics.shared.record("panel_ordered", since: showStarted)
+        if !state.searchVisible { panel.makeFirstResponder(nil) }
     }
     func diagnostics() -> [String: Any] {
         ["version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
@@ -701,17 +707,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return (CFUUIDCreateString(nil, value) as String) == uuid
             }) { return found }
         }
-        if let frontPID, AXIsProcessTrusted() {
-            let app = AXUIElementCreateApplication(frontPID); AXUIElementSetMessagingTimeout(app, 0.12)
-            if let value = axAttribute(app, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() {
-                AXUIElementSetMessagingTimeout(value as! AXUIElement, 0.12)
-                if let rect = axFrame(value as! AXUIElement) {
-                    return screens.max { a, b in
-                        let ai = (a.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-                        let bi = (b.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-                        let ar = CGDisplayBounds(ai).intersection(rect), br = CGDisplayBounds(bi).intersection(rect)
-                        return max(0, ar.width) * max(0, ar.height) < max(0, br.width) * max(0, br.height)
-                    }
+        // Asked of the window server, not the app: the panel must not wait for an app that may not be answering.
+        // The list runs front to back, so this is the app's frontmost window, ignoring its tiny helper surfaces.
+        if let frontPID, let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] {
+            for window in list where (window[kCGWindowOwnerPID as String] as? Int32) == frontPID && (window[kCGWindowLayer as String] as? Int) == 0 {
+                guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                      let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width >= 60, rect.height >= 45 else { continue }
+                return screens.max { a, b in
+                    let ai = (a.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+                    let bi = (b.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+                    let ar = CGDisplayBounds(ai).intersection(rect), br = CGDisplayBounds(bi).intersection(rect)
+                    return max(0, ar.width) * max(0, ar.height) < max(0, br.width) * max(0, br.height)
                 }
             }
         }
@@ -776,6 +782,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func handleKey(_ event: NSEvent) -> Bool {
+        // The panel is about to close; a key must not start a search in it or act on the old selection.
+        guard !focusInFlight else { return true }
         stopModifierRepeat()
         if let editor = panel.firstResponder as? NSTextView, editor.hasMarkedText() { return false }
         let code = UInt32(event.keyCode)
@@ -889,7 +897,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func confirm() {
-        guard showing else { return }
+        guard showing, !focusInFlight else { return }
         var fromCache = false
         if state.loading {
             // Already waiting for the fresh list: the release timer asks again every 50 ms, and the list settles it.
@@ -920,20 +928,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if !AXIsProcessTrusted() && selected.browserTab == nil { state.setMessage("请先开启辅助功能权限。", error: true); state.sticky = true; relayout(); return }
         if selected.browserTab != nil { focusBrowserTab(selected); return }
-        if let error = WindowControl.perform(.focus, on: selected) {
-            // The cached entry may be out of date: the read in progress decides, as if this had waited for it.
-            if fromCache && state.loading { pendingCommit = true; pendingFocusID = selected.id; return }
-            pendingCommit = false; state.sticky = true; state.setMessage(error, error: true); relayout()
-            panel.makeKeyAndOrderFront(nil); return
+        // The app may not be answering, and the keyboard and panel should not wait with it. The panel stays until
+        // it has, so a window that cannot be reached can say why.
+        focusInFlight = true; state.actionPending = true
+        let generation = showGeneration
+        WindowControl.performInBackground(.focus, on: selected) { [weak self] error in
+            self?.finishFocus(selected, error: error, fromCache: fromCache, generation: generation)
         }
-        else {
-            dismiss()
+    }
+    private func finishFocus(_ selected: WindowHandle, error: String?, fromCache: Bool, generation: Int) {
+        let open = showing && showGeneration == generation
+        let nextTrigger = open ? triggerAfterFocus : nil
+        if open { focusInFlight = false; state.actionPending = false; triggerAfterFocus = nil }
+        guard let error else {
             engine.markFocused(selected)
+            guard open else { return }
+            dismiss()
             let mode = state.settings.advanced.followCursor
             if mode != .never, let rect = selected.descriptor.frame, rect.width > 0,
                mode == .always || selected.descriptor.displayID.map({ !CGDisplayBounds($0).contains(state.cursor ?? .zero) }) == true {
                 CGWarpMouseCursorPosition(CGPoint(x: rect.x + rect.width / 2, y: rect.y + rect.height / 2))
             }
+            if let nextTrigger { trigger(index: nextTrigger.index, reverse: nextTrigger.reverse) }
+            return
+        }
+        guard open else { return }
+        switch FocusFailurePolicy.action(fromCache: fromCache, loading: state.loading) {
+        case .waitForFreshList:
+            pendingCommit = true; pendingFocusID = selected.id
+            if panelOrderDeferred { panelOrderDeferred = false; orderPanelFront() }
+        case .commitFreshList:
+            confirm()
+        case .report:
+            pendingCommit = false; state.sticky = true; state.setMessage(error, error: true); relayout()
+            panelOrderDeferred = false
+            orderPanelFront()
         }
     }
     /// A settings window hidden for the panel is otherwise lost: 一瞥 does not list its own windows.
@@ -951,6 +980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func dismiss(cancelled: Bool = false) {
         showing = false; pendingCommit = false; pendingFocusID = nil; gestureActive = false; heldTriggerModifiers = []
+        focusInFlight = false; panelOrderDeferred = false; triggerAfterFocus = nil
         showGeneration += 1; let generation = showGeneration
         stopModifierRepeat(); refreshDebounce?.cancel(); refreshDebounce = nil
         releaseTimer?.invalidate(); releaseTimer = nil; panelInput.setEnabled(false)
@@ -975,8 +1005,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.sticky = true
         pendingCommit = false; pendingFocusID = nil
         state.setMessage("")
-        if let error = WindowControl.perform(action, on: selected) { state.setMessage(error, error: true); relayout(); return }
         state.actionPending = true
+        let generation = showGeneration
+        WindowControl.performInBackground(action, on: selected) { [weak self] error in
+            guard let self, self.showing, self.showGeneration == generation else { return }
+            if let error { self.state.actionPending = false; self.state.setMessage(error, error: true); self.relayout(); return }
+            self.reportAction(action, on: selected, generation: generation)
+        }
+    }
+    private func reportAction(_ action: WindowAction, on selected: WindowHandle, generation: Int) {
         let title = selected.descriptor.displayTitle
         let feedback: String
         switch action {
@@ -992,7 +1029,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .focus: feedback = ""
         }
         state.setMessage(feedback); relayout()
-        let generation = showGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + (action == .fullscreen ? 0.8 : 0.2)) { [weak self] in
             guard let self, self.showing, self.showGeneration == generation else { return }
             self.engine.refresh(frontPID: self.state.frontPID) { [weak self] handles in
@@ -1108,7 +1144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.style = settings.value.style; state.frontPID = nil; state.displayID = nil; state.loading = false
         state.searchVisible = false
         state.expandedApp = nil; state.extraItems = []; state.zoomImage = nil; state.pinnedIDs = []; state.badges = [:]
-        state.query = ""; state.setMessage(""); state.sticky = true; state.isDemo = true; state.actionPending = false
+        state.query = ""; state.setMessage(""); state.sticky = true; state.isDemo = true; state.actionPending = false; focusInFlight = false
         pendingCommit = false; pendingFocusID = nil; state.setVisiblePreviews([]); showGeneration += 1
         let examples = [("Safari浏览器", "设计参考与工作资料", "/Applications/Safari.app"), ("访达", "项目文件", "/System/Library/CoreServices/Finder.app"),
                         ("终端", "开发工作区", "/System/Applications/Utilities/Terminal.app"), ("邮件", "收件箱", "/System/Applications/Mail.app"),

@@ -35,10 +35,10 @@ extension AppDelegate {
         showPreview(automatic: false)
     }
     func updateAutomaticPreview() {
-        guard showing, !state.loading, state.settings.advanced.autoPreview else { return }
+        guard showing, !focusInFlight, !state.loading, state.settings.advanced.autoPreview else { return }
         if state.selected == nil { previewPanel?.orderOut(nil); return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.showing, self.state.settings.advanced.autoPreview else { return }
+            guard let self, self.showing, !self.focusInFlight, self.state.settings.advanced.autoPreview else { return }
             self.showPreview(automatic: true)
         }
     }
