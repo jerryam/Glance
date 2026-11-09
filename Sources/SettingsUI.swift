@@ -161,6 +161,11 @@ final class SettingsModel: ObservableObject {
     var errorsHandler: () -> [String] = { [] }
     var beforeFirstApply: () -> Void = {}
     var clearHabitsHandler: () -> Void = {}
+    @Published var layouts: [LayoutSnapshot] = []
+    var saveLayoutHandler: () -> Void = {}
+    var restoreLayoutHandler: (UUID) -> Void = { _ in }
+    var renameLayoutHandler: (UUID) -> Void = { _ in }
+    var deleteLayoutHandler: (UUID) -> Void = { _ in }
     private var appliedThisSession = false
     private var pending: DispatchWorkItem?
     var draft: UserSettings {
@@ -536,6 +541,21 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
+            SettingsGroup("窗口布局") {
+                SettingsNote("记下所有窗口现在的位置和大小，之后一次放回去。可以在这里恢复，也可以在搜索里输入布局的名称或“布局”，或者用菜单栏图标的右键菜单。")
+                ForEach(model.layouts) { layout in
+                    LabeledContent(layout.name) {
+                        HStack(spacing: 8) {
+                            Text("\(layout.windows.count) 个窗口").foregroundStyle(.secondary)
+                            Button("恢复") { model.restoreLayoutHandler(layout.id) }
+                            Button("重命名…") { model.renameLayoutHandler(layout.id) }
+                            Button("删除…") { model.deleteLayoutHandler(layout.id) }
+                        }
+                    }
+                }
+                Button("保存当前布局…") { model.saveLayoutHandler() }
+                SettingsNote("恢复时，最小化的窗口和隐藏的应用会重新显示。没有打开的应用不会被打开，已关闭的窗口不会重新出现，全屏窗口不处理，也不恢复窗口的前后顺序。保存时会记下窗口标题，用来区分同一个应用的多个窗口；布局只存在这台 Mac 上，不随设置导出。")
             }
         }
     }

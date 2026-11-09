@@ -35,6 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var previewPanel: PreviewPanel?
     var settingsWindow: NSWindow?
     var settingsModel: SettingsModel?
+    var layouts: [LayoutSnapshot] = []
+    /// Counts only: how many windows the last restore placed, of how many.
+    var layoutResult = ""
+    let layoutsMenu = NSMenu()
     var settingsViewLoaded = false
     /// Reopenings after a crash within the policy's window, and whether they have just gone over its limit.
     var crashRestarts: [Double] = []
@@ -116,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         loadPins()
         engine.restoreRecentOrder()
         loadSearchHabits()
+        loadLayouts()
         state.onSelect = { [weak self] index, commit in
             guard let self else { return }
             self.state.selectedIndex = index
@@ -476,6 +481,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let row = item(style.label, #selector(setStyle(_:))); row.tag = i; stylesMenu.addItem(row)
         }
         styles.submenu = stylesMenu; menu.addItem(styles)
+        let layoutsItem = NSMenuItem(title: "窗口布局", action: nil, keyEquivalent: "")
+        layoutsItem.submenu = layoutsMenu; menu.addItem(layoutsItem)
         menu.addItem(item("设置与权限…", #selector(openSettings)))
         menu.addItem(item("重新启动一瞥", #selector(relaunch)))
         menu.addItem(.separator())
@@ -508,6 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         item("菜单栏图标设置…", #selector(openMenuBarSettings)), NSMenuItem.separator()]
         }
         for (offset, entry) in entries.enumerated() { entry.tag = 900; statusMenu.insertItem(entry, at: offset) }
+        fillLayoutsMenu()
         status.menu = statusMenu
         status.button?.performClick(nil)
         status.menu = nil
@@ -720,6 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
          "recentOrder": engine.recentOrderCounts,
          "searchHabits": state.habits.count,
+         "layouts": ["saved": layouts.count, "lastRestore": layoutResult],
          "crashRestart": ["armed": CrashRestart.armed, "stopped": crashRestartStopped, "recent": crashRestarts.count],
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
@@ -1140,6 +1149,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.applyHandler = { [weak self] in self?.settings.save($0) }
             model.errorsHandler = { [weak self] in self?.shortcutErrors ?? [] }
             model.clearHabitsHandler = { [weak self] in self?.clearSearchHabits() }
+            model.layouts = layouts
+            model.saveLayoutHandler = { [weak self] in self?.saveCurrentLayout() }
+            model.restoreLayoutHandler = { [weak self] id in self?.restoreLayout(id) }
+            model.renameLayoutHandler = { [weak self] id in self?.renameLayout(id) }
+            model.deleteLayoutHandler = { [weak self] id in self?.deleteLayout(id) }
             model.beforeFirstApply = { [weak self] in self?.settings.snapshotBackup() }
             settingsModel = model
         }

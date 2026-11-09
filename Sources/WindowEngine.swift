@@ -814,6 +814,30 @@ enum WindowControl {
         if let kind = command.kind { return arrange(window, kind, screens: screens) }
         return restoreFrame(window, screens: screens)
     }
+    /// Puts windows where a saved layout has them, one after another. How many it placed arrives on the main queue.
+    static func restoreLayout(_ placements: [(handle: WindowHandle, frame: WindowRect)], completion: @escaping (Int) -> Void) {
+        actionQueue.async {
+            let placed = placements.filter { moveForLayout($0.handle, to: $0.frame) == nil }.count
+            DispatchQueue.main.async { completion(placed) }
+        }
+    }
+    private static func moveForLayout(_ handle: WindowHandle, to target: WindowRect) -> String? {
+        guard let app = NSRunningApplication(processIdentifier: handle.descriptor.pid), let ax = element(for: handle) else { return "这个窗口已经关闭。" }
+        AXUIElementSetMessagingTimeout(ax, 0.15)
+        if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
+        if app.isHidden { app.unhide() }
+        if (axAttribute(ax, kAXMinimizedAttribute) as? NSNumber)?.boolValue == true {
+            AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        let current = axFrame(ax).map { windowRect($0) }
+        if let error = place(ax, at: target) { return error }
+        // So that 还原 can take a window back from a layout, as it can from any other arrangement.
+        if let window = NativeBridge.windowID(ax), let current {
+            let applied = axFrame(ax).map { windowRect($0) } ?? target
+            withFrameMemory { $0.recordArrangement(of: window, from: current, to: applied) }
+        }
+        return nil
+    }
     /// Only the main thread may give up activation. It never waits for the action queue, so this cannot deadlock.
     private static func yieldActivation(to app: NSRunningApplication) {
         if Thread.isMainThread { NSApp.yieldActivation(to: app) }

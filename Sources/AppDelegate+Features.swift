@@ -195,10 +195,129 @@ extension AppDelegate {
     func updateExtraItems() {
         guard showing, !state.isDemo else { return }
         let advanced = settings.value.advanced
-        state.extraItems = (advanced.browserTabs ? browserTabs.all : []) + menuBar.searchResults()
-            + launcher.results(apps: advanced.searchApps, settingsPages: advanced.searchSettingsPages, commands: advanced.searchCommands)
-            + (advanced.searchFiles ? fileSearch.results : [])
+        var extra = (advanced.browserTabs ? browserTabs.all : []) + menuBar.searchResults()
+        extra += launcher.results(apps: advanced.searchApps, settingsPages: advanced.searchSettingsPages, commands: advanced.searchCommands)
+        if advanced.searchFiles { extra += fileSearch.results }
+        if advanced.searchCommands { extra += layoutRows() }
+        state.extraItems = extra
         if !state.query.isEmpty { state.refilter(reset: false) }
+    }
+
+    // MARK: Window layouts
+
+    static let layoutsKey = "WindowHop.layoutSnapshots.v1"
+    static let saveLayoutTarget = "save"
+    func loadLayouts() {
+        layouts = LayoutSnapshotPolicy.decoded(UserDefaults.standard.data(forKey: Self.layoutsKey))
+    }
+    private func storeLayouts() {
+        if let data = try? JSONEncoder().encode(layouts) { UserDefaults.standard.set(data, forKey: Self.layoutsKey) }
+        settingsModel?.layouts = layouts
+    }
+    func layoutRows() -> [WindowHandle] {
+        func row(_ id: String, title: String, alias: String, target: String) -> WindowHandle {
+            var descriptor = WindowDescriptor(id: id, windowID: nil, pid: 0, appName: alias, bundleID: "", title: title,
+                                              minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            descriptor.launcher = .layout
+            descriptor.launchTarget = target
+            descriptor.subtitle = LayoutSnapshotPolicy.keywords
+            return WindowHandle(descriptor: descriptor, ax: nil, icon: NSImage(systemSymbolName: LaunchKind.layout.symbol, accessibilityDescription: nil))
+        }
+        var rows = [row("layout:save", title: "保存当前窗口布局…", alias: "Save Window Layout", target: Self.saveLayoutTarget)]
+        for layout in layouts {
+            rows.append(row("layout:\(layout.id.uuidString)", title: "恢复布局：\(layout.name)", alias: "Restore Window Layout", target: layout.id.uuidString))
+        }
+        return rows
+    }
+    func fillLayoutsMenu() {
+        layoutsMenu.removeAllItems()
+        layoutsMenu.addItem(item("保存当前布局…", #selector(saveLayoutFromMenu)))
+        if !layouts.isEmpty { layoutsMenu.addItem(.separator()) }
+        for layout in layouts {
+            let row = item("恢复：\(layout.name)", #selector(restoreLayoutFromMenu(_:)))
+            row.representedObject = layout.id.uuidString
+            layoutsMenu.addItem(row)
+        }
+    }
+    @objc func saveLayoutFromMenu() { saveCurrentLayout() }
+    @objc func restoreLayoutFromMenu(_ sender: NSMenuItem) {
+        if let text = sender.representedObject as? String, let id = UUID(uuidString: text) { restoreLayout(id) }
+    }
+    /// Asks for a name on a turn of its own, as this may be called while the panel closes.
+    func saveCurrentLayout() {
+        DispatchQueue.main.async { [weak self] in self?.askAndSaveLayout() }
+    }
+    private func askAndSaveLayout() {
+        guard AXIsProcessTrusted() else { showNotice("保存窗口布局需要先为“一瞥”开启辅助功能权限。"); return }
+        let suggested = LayoutSnapshotPolicy.suggestedName(among: layouts)
+        guard let typed = askLayoutName(title: "保存当前窗口布局", button: "保存", name: suggested) else { return }
+        let name = typed.isEmpty ? suggested : typed
+        if layouts.contains(where: { $0.name == name }), !confirmLayoutChange("已经有名为“\(name)”的布局，要替换它吗？", button: "替换") { return }
+        engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in
+            guard let self else { return }
+            let layout = LayoutSnapshotPolicy.capture(name: name, windows: handles.map(\.descriptor), screens: WindowControl.screenAreas(), now: Date.timeIntervalSinceReferenceDate)
+            guard !layout.windows.isEmpty else { self.showNotice("现在没有可以保存的窗口。最小化的窗口、隐藏的应用和全屏窗口不会保存。"); return }
+            guard let updated = LayoutSnapshotPolicy.adding(layout, to: self.layouts) else {
+                self.showNotice("最多保存 \(LayoutSnapshotPolicy.limit) 个布局，请先在 设置 › 输入和搜索 里删除不用的。")
+                return
+            }
+            self.layouts = updated
+            self.storeLayouts()
+            self.settingsModel?.note("已保存“\(layout.name)”：\(layout.windows.count) 个窗口。")
+        }
+    }
+    func restoreLayout(_ id: UUID) {
+        guard let layout = layouts.first(where: { $0.id == id }) else { NSSound.beep(); return }
+        guard AXIsProcessTrusted() else { showNotice("恢复窗口布局需要先为“一瞥”开启辅助功能权限。"); return }
+        engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in
+            guard let self else { return }
+            let screens = WindowControl.screenAreas()
+            let matches = LayoutSnapshotPolicy.match(layout.windows, live: handles.map(\.descriptor))
+            let byID = Dictionary(handles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var placements: [(handle: WindowHandle, frame: WindowRect)] = []
+            for index in layout.windows.indices {
+                guard let liveID = matches[index], let handle = byID[liveID] else { continue }
+                placements.append((handle: handle, frame: LayoutSnapshotPolicy.target(of: layout.windows[index].frame, savedScreens: layout.screens, screens: screens)))
+            }
+            WindowControl.restoreLayout(placements) { [weak self] placed in
+                guard let self else { return }
+                self.layoutResult = "\(placed)/\(layout.windows.count)"
+                let summary = LayoutSnapshotPolicy.summary(placed: placed, total: layout.windows.count)
+                // Windows moving say enough when it worked. With none moved, nothing on screen would explain why.
+                if placed == 0 { self.showNotice(summary) } else { self.settingsModel?.note(summary) }
+            }
+        }
+    }
+    func renameLayout(_ id: UUID) {
+        guard let index = layouts.firstIndex(where: { $0.id == id }) else { return }
+        guard let name = askLayoutName(title: "重命名布局", button: "重命名", name: layouts[index].name), !name.isEmpty else { return }
+        guard !layouts.contains(where: { $0.name == name && $0.id != id }) else { settingsModel?.note("已经有名为“\(name)”的布局。", error: true); return }
+        layouts[index].name = name
+        storeLayouts()
+    }
+    func deleteLayout(_ id: UUID) {
+        guard let layout = layouts.first(where: { $0.id == id }), confirmLayoutChange("要删除布局“\(layout.name)”吗？", button: "删除") else { return }
+        layouts.removeAll { $0.id == id }
+        storeLayouts()
+    }
+    private func askLayoutName(title: String, button: String, name: String) -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.addButton(withTitle: button); alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = name
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return LayoutSnapshotPolicy.cleaned(name: field.stringValue)
+    }
+    private func confirmLayoutChange(_ question: String, button: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = question
+        alert.addButton(withTitle: button); alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: The rest of the start menu
@@ -250,6 +369,12 @@ extension AppDelegate {
             // Only ever built here as http or https; checked again because this is where it leaves for the browser.
             guard let target = descriptor.launchTarget, let url = URL(string: target), ["http", "https"].contains((url.scheme ?? "").lowercased()) else { return false }
             return NSWorkspace.shared.open(url)
+        case .layout:
+            guard let target = descriptor.launchTarget else { return false }
+            if target == Self.saveLayoutTarget { saveCurrentLayout(); return true }
+            guard let id = UUID(uuidString: target) else { return false }
+            restoreLayout(id)
+            return true
         case .calculation:
             guard let answer = descriptor.launchTarget else { return false }
             NSPasteboard.general.clearContents()

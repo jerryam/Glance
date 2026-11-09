@@ -416,7 +416,7 @@ struct SettingsArchive: Codable {
 
 /// What a search result opens when it is not a window.
 enum LaunchKind: Equatable, CaseIterable {
-    case app, setting, command, file, calculation, web
+    case app, setting, command, file, calculation, web, layout
     var label: String {
         switch self {
         case .app: return "未打开的应用"
@@ -425,6 +425,7 @@ enum LaunchKind: Equatable, CaseIterable {
         case .file: return "文件"
         case .calculation: return "计算结果"
         case .web: return "用浏览器打开"
+        case .layout: return "窗口布局"
         }
     }
     var symbol: String {
@@ -435,10 +436,17 @@ enum LaunchKind: Equatable, CaseIterable {
         case .file: return "doc"
         case .calculation: return "equal.circle"
         case .web: return "globe"
+        case .layout: return "rectangle.3.group"
         }
     }
     /// What Return does, on a button.
-    var action: String { self == .calculation ? "复制" : "打开" }
+    var action: String {
+        switch self {
+        case .calculation: return "复制"
+        case .command, .layout: return "执行"
+        case .app, .setting, .file, .web: return "打开"
+        }
+    }
     /// What Return does, in a sentence.
     var hint: String {
         switch self {
@@ -448,6 +456,7 @@ enum LaunchKind: Equatable, CaseIterable {
         case .file: return "按 ↩ 打开这个文件"
         case .calculation: return "按 ↩ 复制结果"
         case .web: return "按 ↩ 用默认浏览器打开"
+        case .layout: return "按 ↩ 保存或恢复窗口布局"
         }
     }
     /// Made from what was typed, so there is nothing to match the typing against.
@@ -456,7 +465,7 @@ enum LaunchKind: Equatable, CaseIterable {
     var place: Int {
         switch self {
         case .calculation: return 0
-        case .app, .setting, .command: return 1
+        case .app, .setting, .command, .layout: return 1
         case .file: return 2
         case .web: return 3
         }

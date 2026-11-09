@@ -414,6 +414,107 @@ enum DockPreviewPolicy {
     }
 }
 
+/// Where the windows were when the user asked to remember it. Unlike everything else 一瞥 keeps, this holds window
+/// titles, because the user asked for this record and they are what tells two windows of one app apart. It is kept
+/// under its own key on this Mac and is not part of a settings export.
+struct LayoutSnapshot: Codable, Equatable, Identifiable {
+    struct Window: Codable, Equatable {
+        let bundleID: String
+        let appName: String
+        let title: String
+        let windowID: UInt32?
+        let frame: WindowRect
+    }
+    let id: UUID
+    var name: String
+    let created: Double
+    /// The screens' areas at the time, in the order the system listed them: what the frames are relative to.
+    let screens: [WindowRect]
+    let windows: [Window]
+}
+
+enum LayoutSnapshotPolicy {
+    static let limit = 20
+    static let windowLimit = 200
+    static let longestName = 40
+    /// What finds a layout in the search, besides its name.
+    static let keywords = "布局 快照 buju kuaizhao layout snapshot"
+
+    static func decoded(_ data: Data?) -> [LayoutSnapshot] {
+        guard let data, let layouts = try? JSONDecoder().decode([LayoutSnapshot].self, from: data) else { return [] }
+        return layouts
+    }
+    static func cleaned(name: String) -> String {
+        String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(longestName))
+    }
+    static func suggestedName(among layouts: [LayoutSnapshot]) -> String {
+        let names = Set(layouts.map(\.name))
+        var number = 1
+        while names.contains("布局 \(number)") { number += 1 }
+        return "布局 \(number)"
+    }
+    /// Windows worth remembering: on screen, with a place, and something to find them by later.
+    static func capturable(_ window: WindowDescriptor) -> Bool {
+        guard restorable(window), !window.minimized, !window.hidden, let frame = window.frame else { return false }
+        return frame.width > 0 && frame.height > 0
+    }
+    /// Windows a layout can move. A minimized window or a hidden app comes back; a full screen window has no place to move to.
+    static func restorable(_ window: WindowDescriptor) -> Bool {
+        !window.windowless && !window.searchOnly && !window.settingsWindow && !window.fullscreen && window.tabRepresentative && !window.bundleID.isEmpty
+    }
+    static func capture(name: String, windows: [WindowDescriptor], screens: [WindowRect], now: Double) -> LayoutSnapshot {
+        let kept: [LayoutSnapshot.Window] = windows.filter(capturable).prefix(windowLimit).compactMap { window in
+            guard let frame = window.frame else { return nil }
+            return LayoutSnapshot.Window(bundleID: window.bundleID, appName: window.appName, title: window.title, windowID: window.windowID, frame: frame)
+        }
+        return LayoutSnapshot(id: UUID(), name: cleaned(name: name), created: now, screens: screens, windows: kept)
+    }
+    /// The same name replaces the older one. Nil when there is no room for another.
+    static func adding(_ layout: LayoutSnapshot, to layouts: [LayoutSnapshot]) -> [LayoutSnapshot]? {
+        if let index = layouts.firstIndex(where: { $0.name == layout.name }) {
+            var result = layouts
+            result[index] = layout
+            return result
+        }
+        return layouts.count < limit ? layouts + [layout] : nil
+    }
+    /// Which open window each saved one has become, by its position in the snapshot. The same window if it is still
+    /// there, then one with the same title, then any other of that app's. No open window is used twice.
+    static func match(_ saved: [LayoutSnapshot.Window], live: [WindowDescriptor]) -> [Int: String] {
+        var free = live.filter(restorable)
+        var result: [Int: String] = [:]
+        func pass(_ same: (LayoutSnapshot.Window, WindowDescriptor) -> Bool) {
+            for (index, window) in saved.enumerated() where result[index] == nil {
+                guard let found = free.firstIndex(where: { $0.bundleID == window.bundleID && same(window, $0) }) else { continue }
+                result[index] = free.remove(at: found).id
+            }
+        }
+        pass { $0.windowID != nil && $0.windowID == $1.windowID }
+        pass { $0.title == $1.title }
+        pass { _, _ in true }
+        return result
+    }
+    /// Where a saved frame belongs on the screens there are now. On the same screen it is exactly where it was, even
+    /// partly off screen. On another one it keeps its share of the screen, so a left half stays a left half.
+    static func target(of frame: WindowRect, savedScreens: [WindowRect], screens: [WindowRect]) -> WindowRect {
+        guard !screens.isEmpty, !savedScreens.isEmpty else { return frame }
+        let index = WindowArrangement.screenIndex(of: frame, in: savedScreens)
+        let old = savedScreens[index]
+        guard old.width > 0, old.height > 0 else { return frame }
+        let sameSize = screens.first(where: { $0.width == old.width && $0.height == old.height })
+        let new = screens.first(where: { $0 == old }) ?? sameSize ?? (index < screens.count ? screens[index] : screens[0])
+        if new == old { return frame }
+        let scaleX = new.width / old.width, scaleY = new.height / old.height
+        let width = min((frame.width * scaleX).rounded(), new.width), height = min((frame.height * scaleY).rounded(), new.height)
+        let x = new.x + ((frame.x - old.x) * scaleX).rounded(), y = new.y + ((frame.y - old.y) * scaleY).rounded()
+        return WindowRect(x: min(max(x, new.x), new.x + new.width - width), y: min(max(y, new.y), new.y + new.height - height), width: width, height: height)
+    }
+    static func summary(placed: Int, total: Int) -> String {
+        if placed >= total { return "已恢复 \(placed) 个窗口。" }
+        return "已恢复 \(placed) 个窗口，另外 \(total - placed) 个没有恢复：应用没有打开、窗口已经关闭，或应用不允许调整。"
+    }
+}
+
 /// The start menu's commands. Anything that ends the session asks first: restart, shut down and log out through the
 /// system's own dialog, emptying the Trash through 一瞥's.
 enum SystemCommand: String, CaseIterable {
@@ -856,6 +957,7 @@ enum SettingSearchIndex {
         .init(1, "使用方向键选择窗口", "arrow"), .init(1, "使用 H / J / K / L 选择窗口", "vim"),
         .init(1, "面板中的快捷键 · 点击按键可重新录制", "录制 关闭 退出 最小化 按键 半屏 填满 屏幕 置顶"),
         .init(1, "启用全局窗口快捷键", "半屏 四分屏 三分屏 分屏 居中 还原 窗口位置 全局 snap tile"),
+        .init(1, "窗口布局", "布局 快照 保存 恢复 工作区 多显示器 layout snapshot workspace"),
         .init(2, "外观", "液态玻璃 liquid glass"), .init(2, "显示样式", "图标 缩略图 列表 style"),
         .init(2, "主题", "浅色 深色 跟随系统 theme"), .init(2, "显示标题", "窗口 应用 名称"),
         .init(2, "过长标题省略位置", "截断 开头 中间 末尾"),

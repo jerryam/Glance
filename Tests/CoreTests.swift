@@ -281,7 +281,105 @@ struct CoreTests {
         verifyChineseSearch()
         verifyCrashRestart()
         verifyStartMenu()
+        verifyLayoutSnapshots()
         print("\(passed) checks passed")
+    }
+    static func verifyLayoutSnapshots() {
+        let place = WindowRect(x: 10, y: 40, width: 300, height: 200)
+        let screen = WindowRect(x: 0, y: 25, width: 1440, height: 875)
+        func window(_ id: String, bundle: String = "a", title: String = "文档", number: UInt32? = nil, minimized: Bool = false, hidden: Bool = false, frame: WindowRect? = WindowRect(x: 10, y: 40, width: 300, height: 200)) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: number, pid: 7, appName: bundle, bundleID: bundle, title: title, minimized: minimized, hidden: hidden, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            d.frame = frame
+            return d
+        }
+        func saved(bundle: String = "a", title: String = "文档", number: UInt32? = nil) -> LayoutSnapshot.Window {
+            LayoutSnapshot.Window(bundleID: bundle, appName: bundle, title: title, windowID: number, frame: place)
+        }
+        func layout(_ name: String, _ windows: [LayoutSnapshot.Window] = []) -> LayoutSnapshot {
+            LayoutSnapshot(id: UUID(), name: name, created: 0, screens: [screen], windows: windows)
+        }
+
+        // What is remembered.
+        var fullScreen = window("full"); fullScreen.fullscreen = true
+        var noWindow = window("none"); noWindow.windowless = true
+        var tab = window("tab"); tab.tabRepresentative = false
+        var own = window("own"); own.settingsWindow = true
+        var row = window("row"); row.launcher = .app
+        let notKept = [fullScreen, noWindow, tab, own, row, window("min", minimized: true), window("hid", hidden: true), window("nof", frame: nil), window("nob", bundle: ""), window("flat", frame: WindowRect(x: 0, y: 0, width: 0, height: 0))]
+        for item in notKept { check(!LayoutSnapshotPolicy.capturable(item), "不保存：\(item.id)") }
+        let captured = LayoutSnapshotPolicy.capture(name: "  工作  ", windows: notKept + [window("kept", bundle: "b", title: "表格", number: 11)], screens: [screen], now: 5)
+        check(captured.name == "工作", "名称去掉首尾空格")
+        check(captured.windows == [saved(bundle: "b", title: "表格", number: 11)], "只保存屏幕上的窗口，并记下位置和标题")
+        check(captured.screens == [screen] && captured.created == 5, "记下当时的屏幕")
+        check(LayoutSnapshotPolicy.capture(name: "x", windows: (0..<500).map { window("w\($0)") }, screens: [], now: 0).windows.count == LayoutSnapshotPolicy.windowLimit, "窗口数量有上限")
+
+        // Names and the list.
+        check(LayoutSnapshotPolicy.suggestedName(among: []) == "布局 1", "第一个布局的名称")
+        check(LayoutSnapshotPolicy.suggestedName(among: [layout("布局 1"), layout("布局 3")]) == "布局 2", "建议的名称不重复")
+        check(LayoutSnapshotPolicy.cleaned(name: " a\n") == "a", "名称去掉换行")
+        check(LayoutSnapshotPolicy.cleaned(name: String(repeating: "长", count: 100)).count == LayoutSnapshotPolicy.longestName, "名称长度有上限")
+        let first = layout("工作"), second = layout("回家")
+        let added = LayoutSnapshotPolicy.adding(second, to: [first])
+        check(added == [first, second], "新名称加在后面")
+        let again = layout("工作", [saved()])
+        check(LayoutSnapshotPolicy.adding(again, to: [first, second]) == [again, second], "同名的布局被替换")
+        let full = (0..<LayoutSnapshotPolicy.limit).map { layout("布局\($0)") }
+        check(LayoutSnapshotPolicy.adding(layout("再来一个"), to: full) == nil, "布局满了时不会悄悄丢掉旧的")
+        check(LayoutSnapshotPolicy.adding(layout("布局0"), to: full)?.count == LayoutSnapshotPolicy.limit, "布局满了也可以替换同名的")
+        check(LayoutSnapshotPolicy.decoded(try! JSONEncoder().encode([again, second])) == [again, second], "保存后读取不变")
+        check(LayoutSnapshotPolicy.decoded(nil).isEmpty, "没有保存过时是空的")
+        check(LayoutSnapshotPolicy.decoded(Data("不是 JSON".utf8)).isEmpty, "数据损坏时是空的")
+
+        // Finding the windows again.
+        let matched = LayoutSnapshotPolicy.match([saved(title: "文档", number: 11), saved(title: "表格", number: 12), saved(title: "旧", number: 13), saved(bundle: "c", title: "x", number: 14)],
+                                                 live: [window("renamed", title: "改了名", number: 12), window("sameTitle", title: "文档", number: 99), window("other", title: "别的", number: 98), window("wrongApp", bundle: "b", title: "x", number: 14)])
+        check(matched == [0: "sameTitle", 1: "renamed", 2: "other"], "先按窗口编号，再按标题，最后按同一个应用")
+        check(LayoutSnapshotPolicy.match([saved(title: "1"), saved(title: "2")], live: [window("only")]).count == 1, "一个窗口不会被用两次")
+        check(LayoutSnapshotPolicy.match([saved(number: 5)], live: [window("x", bundle: "b", number: 5)]).isEmpty, "其他应用的窗口不算，即使编号相同")
+        check(LayoutSnapshotPolicy.match([saved(title: "T"), saved(title: "U", number: 21)], live: [window("x", title: "T", number: 21)]) == [1: "x"], "编号相同的优先于标题相同的")
+        check(LayoutSnapshotPolicy.match([saved()], live: [fullScreen]).isEmpty, "不移动全屏窗口")
+        check(LayoutSnapshotPolicy.match([saved()], live: [tab]).isEmpty, "不单独移动标签页")
+        check(LayoutSnapshotPolicy.match([saved()], live: [noWindow]).isEmpty, "没有窗口的应用不算")
+        check(LayoutSnapshotPolicy.match([saved()], live: [own]).isEmpty, "不移动一瞥自己的设置窗口")
+        check(LayoutSnapshotPolicy.match([saved()], live: [row]).isEmpty, "搜索结果不算窗口")
+        check(LayoutSnapshotPolicy.match([saved()], live: [window("m", minimized: true)]) == [0: "m"], "最小化的窗口可以恢复")
+        check(LayoutSnapshotPolicy.match([saved()], live: [window("h", hidden: true)]) == [0: "h"], "隐藏的应用的窗口可以恢复")
+        check(LayoutSnapshotPolicy.match([], live: [window("x")]).isEmpty, "空布局不移动任何窗口")
+
+        // Where they go.
+        func target(_ frame: WindowRect, _ old: [WindowRect], _ new: [WindowRect]) -> WindowRect { LayoutSnapshotPolicy.target(of: frame, savedScreens: old, screens: new) }
+        let partlyOff = WindowRect(x: -100, y: 100, width: 800, height: 600)
+        check(target(partlyOff, [screen], [screen]) == partlyOff, "屏幕没变时位置完全不变")
+        check(target(place, [], [screen]) == place, "没有记下屏幕时不换算")
+        check(target(place, [screen], []) == place, "读不到屏幕时不换算")
+        let external = WindowRect(x: 1440, y: 25, width: 1920, height: 1055), movedExternal = WindowRect(x: -1920, y: 25, width: 1920, height: 1055)
+        let onExternal = WindowRect(x: 1500, y: 100, width: 800, height: 600)
+        check(target(onExternal, [screen, external], [screen, external]) == onExternal, "两块屏幕都没变时位置不变")
+        check(target(onExternal, [screen, external], [screen, movedExternal]) == WindowRect(x: -1860, y: 100, width: 800, height: 600), "外接屏换了位置时窗口跟着它")
+        let leftHalf = WindowRect(x: 0, y: 25, width: 720, height: 875), bigger = WindowRect(x: 0, y: 25, width: 2880, height: 1750)
+        check(target(leftHalf, [screen], [bigger]) == WindowRect(x: 0, y: 25, width: 1440, height: 1750), "换了大小的屏幕上，左半屏还是左半屏")
+        let onlyLaptop = target(onExternal, [screen, external], [screen])
+        check(onlyLaptop.x >= screen.x && onlyLaptop.x + onlyLaptop.width <= screen.x + screen.width, "外接屏拔掉后窗口横向留在现有屏幕内")
+        check(onlyLaptop.y >= screen.y && onlyLaptop.y + onlyLaptop.height <= screen.y + screen.height, "外接屏拔掉后窗口纵向留在现有屏幕内")
+        let huge = target(WindowRect(x: 0, y: 25, width: 5000, height: 5000), [screen], [WindowRect(x: 0, y: 25, width: 1000, height: 600)])
+        check(huge.width == 1000 && huge.height == 600, "窗口不会大过屏幕")
+        check(target(place, [WindowRect(x: 0, y: 0, width: 0, height: 0)], [screen]) == place, "保存的屏幕数据不合理时不换算")
+
+        // Saying what happened.
+        check(LayoutSnapshotPolicy.summary(placed: 3, total: 3) == "已恢复 3 个窗口。", "全部恢复")
+        check(LayoutSnapshotPolicy.summary(placed: 2, total: 3).contains("另外 1 个"), "说明有几个没有恢复")
+        check(LayoutSnapshotPolicy.summary(placed: 0, total: 2).contains("另外 2 个"), "一个也没有恢复")
+
+        // In the search.
+        check(LaunchKind.layout.action == "执行" && LaunchKind.command.action == "执行", "布局和命令的回车动作")
+        check(LaunchKind.layout.place == LaunchKind.command.place, "布局和系统命令排在一起")
+        var result = WindowDescriptor(id: "layout:1", windowID: nil, pid: 0, appName: "Restore Window Layout", bundleID: "", title: "恢复布局：工作", minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        result.launcher = .layout
+        result.subtitle = LayoutSnapshotPolicy.keywords
+        for query in ["工作", "布局", "buju", "layout", "snapshot", "快照"] { check(WindowSearch.matches(result, query: query), "搜索可以找到布局：\(query)") }
+        check(SearchHabits.target(of: result) == "layout:1", "搜索习惯只记布局的编号，不记名称")
+        check(SettingSearchIndex.results("窗口布局").first?.section == 1, "设置搜索可以找到窗口布局")
+        check(SettingSearchIndex.results("快照").first?.title == "窗口布局", "设置搜索可以用“快照”找到窗口布局")
     }
     static func verifyStartMenu() {
         // A sum.

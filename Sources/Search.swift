@@ -286,7 +286,7 @@ struct SearchHabits: Codable, Equatable {
     }
     /// What a choice is remembered by. Windows, tabs and apps to open count for their app, which outlives a restart.
     static func target(of window: WindowDescriptor) -> String? {
-        if window.launcher == .setting || window.launcher == .command || window.menuBarItem { return window.id }
+        if window.menuBarItem || window.launcher == .setting || window.launcher == .command || window.launcher == .layout { return window.id }
         return window.bundleID.isEmpty ? nil : "app:\(window.bundleID)"
     }
     var count: Int { queries.count }
