@@ -1,5 +1,6 @@
 import Foundation
 import ApplicationServices
+import CoreServices
 import JavaScriptCore
 
 @main
@@ -432,6 +433,19 @@ struct CoreTests {
         check(SystemCommand.restart.program.arguments.last?.contains("aevtrrst") == true, "重新启动用系统的确认对话框")
         check(SystemCommand.shutDown.program.arguments.last?.contains("aevtrsdn") == true, "关机用系统的确认对话框")
         check(SystemCommand.logOut.program.arguments.last?.contains("aevtlogo") == true, "退出登录用系统的确认对话框")
+        // The codes in those scripts against the SDK's own names: a wrong one could restart the Mac without asking.
+        func code<T: BinaryInteger>(_ value: T) -> String {
+            let number = UInt32(truncatingIfNeeded: value)
+            let bytes: [UInt8] = [UInt8(number >> 24 & 0xFF), UInt8(number >> 16 & 0xFF), UInt8(number >> 8 & 0xFF), UInt8(number & 0xFF)]
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        check(code(kCoreEventClass) == "aevt", "SDK：核心事件类是 aevt")
+        check(code(kAEShowRestartDialog) == "rrst", "SDK：rrst 是显示重新启动对话框")
+        check(code(kAEShowShutdownDialog) == "rsdn", "SDK：rsdn 是显示关机对话框")
+        check(code(kAELogOut) == "logo", "SDK：logo 是退出登录")
+        check(code(kAERestart) == "rest", "SDK：rest 是直接重新启动")
+        check(code(kAEShutDown) == "shut", "SDK：shut 是直接关机")
+        check(code(kAEReallyLogOut) == "rlgo", "SDK：rlgo 是直接退出登录")
         for event in ["aevtrest", "aevtshut", "aevtrlgo"] {
             check(!commands.contains { $0.program.arguments.contains { $0.contains(event) } }, "不使用不经确认就执行的事件：\(event)")
         }
