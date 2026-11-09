@@ -292,6 +292,13 @@ struct CoreTests {
         check(keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "搜索时 Esc 仍然能取消")
         keys.searching = false; keys.markedText = true
         check(!keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "输入法组合文字时，Esc 交给输入法")
+        keys.markedText = false; keys.focusInFlight = true
+        check(!keys.captures(code: PanelCommand.confirm.defaultCode, flags: []), "切换发出后，回车交给正在到前台的窗口")
+        check(!keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "切换发出后，Esc 也不再拦给要关闭的面板")
+
+        check(FocusFailurePolicy.action(fromCache: true, loading: true) == .waitForFreshList, "按旧列表切换失败、新列表还没到时，等新列表决定")
+        check(FocusFailurePolicy.action(fromCache: true, loading: false) == .commitFreshList, "按旧列表切换失败、新列表已到时，按新列表再试一次")
+        check(FocusFailurePolicy.action(fromCache: false, loading: false) == .report, "按新列表切换仍失败时，保留面板并说明原因")
 
         // The waits below hold the main thread, as a slow app would have: the work must get done regardless.
         let thread = BackgroundRunLoop(name: "检查", qos: .userInitiated)

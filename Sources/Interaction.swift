@@ -649,6 +649,16 @@ final class RuntimeDiagnostics {
     var summary: [String: [String: Double]] { timings.mapValues(\.summary) }
 }
 
+/// What to do when bringing a window forward failed. A pick from the cached list may only be out of date, so the
+/// fresh list gets the final say, once; a pick from the fresh list has nothing further to go on.
+enum FocusFailurePolicy {
+    enum Action { case waitForFreshList, commitFreshList, report }
+    static func action(fromCache: Bool, loading: Bool) -> Action {
+        guard fromCache else { return .report }
+        return loading ? .waitForFreshList : .commitFreshList
+    }
+}
+
 /// A thread that only runs a run loop, for event sources whose callbacks must not wait for the main thread.
 final class BackgroundRunLoop: Thread {
     private let ready = DispatchSemaphore(value: 0)
@@ -690,10 +700,13 @@ struct PanelKeySnapshot {
     var mode = PanelInputMode.traditional
     var panelIsKey = false
     var markedText = false
+    /// A window is coming forward and the panel is on its way out, so keys go through to that window.
+    var focusInFlight = false
     /// The shortcuts registered with the system right now. Those keys arrive by that path and are not the tap's to take.
     var triggers: [ShortcutProfile] = []
 
     func captures(code: UInt32, flags: ShortcutModifiers) -> Bool {
+        guard !focusInFlight else { return false }
         let command = PanelInputPolicy.command(code: code, flags: flags, held: held, sticky: sticky, searching: searching, bindings: bindings, mode: mode)
         return PanelKeyCapturePolicy.captures(command: command, panelIsKey: panelIsKey, searching: searching, markedText: markedText,
                                               registeredTrigger: triggers.contains { GlobalShortcutMatch.matches(code: code, flags: flags, profile: $0) })

@@ -149,7 +149,8 @@ final class WindowEngine: ObservableObject {
     private var cacheEventsRead = 0
     private var cacheReadAt: TimeInterval = -1_000
     /// Something has happened that the cached list cannot know about, whether or not a refresh is on its way.
-    var cacheStale: Bool { cacheEvents != cacheEventsRead }
+    /// That includes a focus change still being read: until then the list's order does not know about it.
+    var cacheStale: Bool { cacheEvents != cacheEventsRead || readingFocus }
     var cacheAge: TimeInterval { ProcessInfo.processInfo.systemUptime - cacheReadAt }
     private var pendingTitles = ChangeBatch<AXUIElement>()
     /// How long one refresh waits for every app. A hung app answers "cannot complete" within its own 0.2 second
@@ -340,13 +341,16 @@ final class WindowEngine: ObservableObject {
         guard !readingFocus else { focusAgain = true; return }
         readingFocus = true
         let pid = app.processIdentifier
+        // Whether this focus change counts is settled now. It may have happened just before the panel opened
+        // and still be read after, and belongs in the history all the same.
+        let frozen = suspendTracking
         axThread.perform { [weak self] in
             guard let self else { return }
             let reading = self.readFocus(pid)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.readingFocus = false
-                self.applyFocus(pid: pid, key: reading.key, fullscreen: reading.fullscreen)
+                self.applyFocus(pid: pid, key: reading.key, fullscreen: reading.fullscreen, frozen: frozen)
                 if self.focusAgain { self.focusAgain = false; self.trackFocus() }
             }
         }
@@ -364,11 +368,11 @@ final class WindowEngine: ObservableObject {
         let key = NativeBridge.windowID(window).map { "cg:\($0)" } ?? "\(pid)|\(title)"
         return (key, (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false)
     }
-    private func applyFocus(pid: Int32, key: String?, fullscreen: Bool) {
+    private func applyFocus(pid: Int32, key: String?, fullscreen: Bool, frozen: Bool) {
         let foreground = "\(pid):\(fullscreen)"
         if foreground != lastForeground { lastForeground = foreground; onForegroundChange?() }
         // Freeze MRU while selecting, but continue detecting remote fullscreen changes.
-        guard let key, !suspendTracking else { return }
+        guard let key, !frozen else { return }
         guard key != lastTracked else { return }
         lastTracked = key
         focusHistory[key] = Date.timeIntervalSinceReferenceDate
