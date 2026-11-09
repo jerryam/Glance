@@ -727,7 +727,14 @@ final class PreviewCapture {
     }
 }
 
-enum WindowAction { case focus, close, minimize, fullscreen, quitApp, hideApp, tileLeft, tileRight, maximize, nextScreen }
+enum WindowAction: Equatable {
+    case focus, close, minimize, fullscreen, quitApp, hideApp, tileLeft, tileRight, maximize, nextScreen
+    case arrange(WindowArrangement.Kind), restoreFrame
+}
+extension WindowLayoutCommand {
+    /// The same command for the window selected in the panel.
+    var action: WindowAction { kind.map { WindowAction.arrange($0) } ?? .restoreFrame }
+}
 enum WindowControl {
     /// 设置 › 通用 › 切换窗口的方式. The window-server path falls back automatically when unavailable.
     static var preferWindowServer = true
@@ -740,6 +747,25 @@ enum WindowControl {
             let error = perform(action, on: handle, screens: screens)
             DispatchQueue.main.async { completion(error) }
         }
+    }
+    /// For a global shortcut: the window its app has focused. Asking may wait for that app, so this runs on the
+    /// action queue like any other action. The answer arrives on the main queue.
+    static func performOnFocusedWindow(_ command: WindowLayoutCommand, of pid: Int32, completion: @escaping (String?) -> Void) {
+        let screens = screenAreas()
+        actionQueue.async {
+            let error = applyToFocusedWindow(command, of: pid, screens: screens)
+            DispatchQueue.main.async { completion(error) }
+        }
+    }
+    private static func applyToFocusedWindow(_ command: WindowLayoutCommand, of pid: Int32, screens: [WindowRect]) -> String? {
+        guard AXIsProcessTrusted() else { return "请先为“一瞥”开启辅助功能权限。" }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)
+        guard let focused = axAttribute(app, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return "当前应用没有可以调整的窗口。" }
+        let window = focused as! AXUIElement
+        AXUIElementSetMessagingTimeout(window, 0.15)
+        if let kind = command.kind { return arrange(window, kind, screens: screens) }
+        return restoreFrame(window, screens: screens)
     }
     /// Only the main thread may give up activation. It never waits for the action queue, so this cannot deadlock.
     private static func yieldActivation(to app: NSRunningApplication) {
@@ -829,6 +855,8 @@ enum WindowControl {
         case .tileRight: return arrange(ax, .right, screens: screens)
         case .maximize: return arrange(ax, .maximize, screens: screens)
         case .nextScreen: return arrange(ax, .nextScreen, screens: screens)
+        case .arrange(let kind): return arrange(ax, kind, screens: screens)
+        case .restoreFrame: return restoreFrame(ax, screens: screens)
         }
         return result == .success ? nil : "该应用暂不支持这个窗口操作（\(result.rawValue)）。"
     }
@@ -844,10 +872,39 @@ enum WindowControl {
     private static func arrange(_ ax: AXUIElement, _ kind: WindowArrangement.Kind, screens: [WindowRect]?) -> String? {
         if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
         guard let frame = axFrame(ax) else { return "暂时读不到这个窗口的位置。" }
-        let current = WindowRect(x: Double(frame.minX), y: Double(frame.minY), width: Double(frame.width), height: Double(frame.height))
+        let current = windowRect(frame)
         guard let target = WindowArrangement.frame(kind, window: current, screens: screens ?? screenAreas()) else {
             return kind == .nextScreen ? "只有一块屏幕，无法移到下一块屏幕。" : "没有找到可用的屏幕。"
         }
+        if let error = place(ax, at: target) { return error }
+        if let window = NativeBridge.windowID(ax) {
+            // Where the window really ended up, since an app may round to its own grid: a later difference means the user moved it.
+            let applied = axFrame(ax).map { windowRect($0) } ?? target
+            withFrameMemory { $0.recordArrangement(of: window, from: current, to: applied) }
+        }
+        return nil
+    }
+    private static func restoreFrame(_ ax: AXUIElement, screens: [WindowRect]?) -> String? {
+        if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
+        guard let window = NativeBridge.windowID(ax), let saved = withFrameMemory({ $0.original(of: window) }) else {
+            return "这个窗口没有可还原的位置：一瞥还没有调整过它。"
+        }
+        let current = axFrame(ax).map { windowRect($0) } ?? saved
+        if let error = place(ax, at: WindowArrangement.restored(saved, window: current, screens: screens ?? screenAreas())) { return error }
+        withFrameMemory { $0.forget(window) }
+        return nil
+    }
+    /// Arrangements run on the action queue, and `perform` may also be called from the main thread.
+    private static var frameMemory = WindowFrameMemory()
+    private static let frameMemoryLock = NSLock()
+    private static func withFrameMemory<T>(_ body: (inout WindowFrameMemory) -> T) -> T {
+        frameMemoryLock.lock(); defer { frameMemoryLock.unlock() }
+        return body(&frameMemory)
+    }
+    private static func windowRect(_ frame: CGRect) -> WindowRect {
+        WindowRect(x: Double(frame.minX), y: Double(frame.minY), width: Double(frame.width), height: Double(frame.height))
+    }
+    private static func place(_ ax: AXUIElement, at target: WindowRect) -> String? {
         var origin = CGPoint(x: target.x, y: target.y)
         var size = CGSize(width: target.width, height: target.height)
         guard let position = AXValueCreate(.cgPoint, &origin), let dimension = AXValueCreate(.cgSize, &size) else { return "无法设置窗口位置。" }

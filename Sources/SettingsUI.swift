@@ -127,7 +127,7 @@ enum SettingsSection: Int, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .profiles: return "每个方案是一组快捷键，加上它要显示的窗口和排列方式。"
-        case .search: return "面板里的输入、搜索和按键。"
+        case .search: return "面板里的输入、搜索和按键，以及全局窗口快捷键。"
         case .appearance: return "卡片、预览、面板位置与动画。"
         case .pointer: return "Dock 预览、鼠标悬停、光标跟随与触控板手势。"
         case .menuBar: return "隐藏不常用的菜单栏图标，需要时再显示。"
@@ -494,6 +494,20 @@ struct SettingsView: View {
                     }
                 }
                 SettingsNote("直接输入搜索模式中，普通文字按键用于搜索；这里录制的单键操作在传统模式中生效，带修饰键的组合在两种模式中都可用。停用一项操作也会停用它的 ⌘ 快捷键。")
+            }
+            SettingsGroup("全局窗口快捷键") {
+                SettingsToggle("启用全局窗口快捷键", isOn: $model.draft.windowShortcuts.enabled)
+                SettingsNote("不用打开面板，在任何应用里调整当前窗口的位置和大小；面板打开时作用于选中的窗口。“还原”回到一瞥调整之前的位置。需要辅助功能权限，一瞥自己的窗口除外；没能调整时会发出提示音。")
+                if model.draft.windowShortcuts.enabled {
+                    ForEach($model.draft.windowShortcuts.shortcuts) { $shortcut in
+                        LabeledContent(shortcut.command.label) {
+                            HStack(spacing: 10) {
+                                KeyRecorder(code: $shortcut.hotkey.keyCode, modifiers: $shortcut.hotkey.modifiers, recordingChanged: recordingChanged, allowsModifierOnly: false).frame(width: 140)
+                                Toggle(shortcut.command.label, isOn: $shortcut.hotkey.enabled).labelsHidden().toggleStyle(.switch)
+                            }
+                        }
+                    }
+                }
             }
         }
     }

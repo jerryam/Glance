@@ -271,7 +271,118 @@ struct CoreTests {
         verifyPinsAndRecovery()
         verifyOptimizations()
         verifyThreading()
+        verifyWindowShortcuts()
         print("\(passed) checks passed")
+    }
+    static func verifyWindowShortcuts() {
+        // The second screen is offset, and its size does not divide evenly.
+        let screens = [WindowRect(x: 0, y: 25, width: 1440, height: 875), WindowRect(x: 1440, y: 100, width: 1001, height: 601)]
+        let window = WindowRect(x: 1500, y: 150, width: 400, height: 300)
+        func frame(_ kind: WindowArrangement.Kind) -> WindowRect? { WindowArrangement.frame(kind, window: window, screens: screens) }
+        check(frame(.top) == WindowRect(x: 1440, y: 100, width: 1001, height: 300), "上半屏用窗口所在的屏幕，贴着可用区域的顶边")
+        check(frame(.bottom) == WindowRect(x: 1440, y: 401, width: 1001, height: 300), "下半屏贴着可用区域的底边")
+        check(frame(.topLeft) == WindowRect(x: 1440, y: 100, width: 500, height: 300), "左上四分之一")
+        check(frame(.topRight) == WindowRect(x: 1941, y: 100, width: 500, height: 300), "右上四分之一")
+        check(frame(.bottomLeft) == WindowRect(x: 1440, y: 401, width: 500, height: 300), "左下四分之一")
+        check(frame(.bottomRight) == WindowRect(x: 1941, y: 401, width: 500, height: 300), "右下四分之一")
+        check(frame(.leftThird) == WindowRect(x: 1440, y: 100, width: 333, height: 601), "左三分之一")
+        check(frame(.centerThird) == WindowRect(x: 1773, y: 100, width: 335, height: 601), "中间三分之一吃掉除不尽的部分，三块之间没有缝")
+        check(frame(.rightThird) == WindowRect(x: 2108, y: 100, width: 333, height: 601), "右三分之一")
+        check(frame(.center) == WindowRect(x: 1740, y: 250, width: 400, height: 300), "居中不改变窗口大小")
+        let oversized = WindowRect(x: 1500, y: 150, width: 3000, height: 2000)
+        check(WindowArrangement.frame(.center, window: oversized, screens: screens) == screens[1], "比屏幕大的窗口居中时缩到屏幕以内")
+        let commands = WindowLayoutCommand.allCases
+        let places: [(WindowLayoutCommand, WindowArrangement.Kind)] = [(.leftHalf, .left), (.rightHalf, .right), (.topHalf, .top), (.bottomHalf, .bottom),
+            (.topLeft, .topLeft), (.topRight, .topRight), (.bottomLeft, .bottomLeft), (.bottomRight, .bottomRight),
+            (.leftThird, .leftThird), (.centerThird, .centerThird), (.rightThird, .rightThird), (.maximize, .maximize), (.center, .center)]
+        check(places.allSatisfy { $0.0.kind == $0.1 } && places.count == commands.count - 1 && WindowLayoutCommand.restore.kind == nil, "每个命令对应正确的位置，还原不对应屏幕上的位置")
+        check(commands.allSatisfy { !$0.label.isEmpty } && Set(commands.map(\.label)).count == commands.count, "每个命令有自己的名称")
+        check(commands.allSatisfy { WindowLayoutCommand(slot: $0.slot) == $0 } && Set(commands.map(\.slot)).count == commands.count, "快捷键位置和命令一一对应")
+        check(WindowLayoutCommand(slot: 0) == nil && WindowLayoutCommand(slot: 1) == nil && WindowLayoutCommand(slot: WindowLayoutCommand.firstSlot + commands.count) == nil, "菜单栏快捷键的位置不会被当成窗口命令")
+
+        // 还原
+        let start = WindowRect(x: 10, y: 40, width: 500, height: 400), left = WindowRect(x: 0, y: 25, width: 720, height: 875), right = WindowRect(x: 720, y: 25, width: 720, height: 875)
+        var memory = WindowFrameMemory()
+        check(memory.original(of: 7) == nil, "没有调整过的窗口没有可还原的位置")
+        memory.recordArrangement(of: 7, from: start, to: left)
+        check(memory.original(of: 7) == start, "第一次调整时记住原来的位置")
+        memory.recordArrangement(of: 7, from: left, to: right)
+        check(memory.original(of: 7) == start, "连续调整时，还原回到第一次调整之前")
+        memory.recordArrangement(of: 7, from: WindowRect(x: right.x + 2, y: right.y - 2, width: right.width, height: right.height - 1), to: left)
+        check(memory.original(of: 7) == start, "只差一两点不算手动移动过")
+        let dragged = WindowRect(x: 300, y: 300, width: 640, height: 480)
+        memory.recordArrangement(of: 7, from: dragged, to: right)
+        check(memory.original(of: 7) == dragged, "手动移动过之后，从新的位置重新开始记")
+        memory.forget(7)
+        check(memory.original(of: 7) == nil, "还原之后忘记这个位置")
+        let limit = UInt32(WindowFrameMemory.limit)
+        var crowded = WindowFrameMemory()
+        for id in 0..<limit { crowded.recordArrangement(of: id, from: start, to: left) }
+        crowded.recordArrangement(of: 0, from: left, to: right)
+        crowded.recordArrangement(of: limit, from: start, to: left)
+        check(crowded.original(of: 0) == start && crowded.original(of: 1) == nil && crowded.original(of: limit) == start, "记满之后忘记最久没调整的窗口")
+        check(WindowArrangement.restored(start, window: window, screens: screens) == start, "原来的屏幕还在时回到原来的位置")
+        let gone = WindowRect(x: 5000, y: 100, width: 800, height: 600)
+        check(WindowArrangement.restored(gone, window: window, screens: screens) == WindowRect(x: 1540, y: 100, width: 800, height: 600), "原来的屏幕不在了就居中，不把窗口放到看不见的地方")
+        check(WindowArrangement.restored(gone, window: window, screens: []) == gone, "读不到屏幕时不改动保存的位置")
+
+        // Settings
+        let defaults = WindowShortcutSettings()
+        check(!defaults.enabled && defaults.active.isEmpty, "默认关闭，不占用任何全局按键")
+        check(defaults.shortcuts.map(\.command) == commands && defaults.shortcuts.allSatisfy { $0.hotkey.enabled && $0.hotkey.isValid }, "每个命令都有可用的默认按键")
+        check(Set(defaults.shortcuts.map(\.hotkey.combinationKey)).count == commands.count, "默认按键彼此不同")
+        var settings = UserSettings.defaults
+        settings.windowShortcuts.enabled = true
+        settings.menuBar.toggleHotkey.enabled = true; settings.menuBar.showAllHotkey.enabled = true
+        check(settings.validationError() == nil && settings.windowShortcuts.active.count == commands.count, "打开后不和默认方案、菜单栏快捷键冲突")
+        var conflicted = UserSettings.defaults
+        conflicted.windowShortcuts.enabled = true
+        conflicted.windowShortcuts.shortcuts[0].hotkey = MenuBarHotkey(keyCode: 48, modifiers: .option, enabled: true)
+        check(conflicted.validationError() != nil, "和切换方案相同的按键不能生效")
+        conflicted.windowShortcuts.shortcuts[0].hotkey.enabled = false
+        check(conflicted.validationError() == nil && conflicted.windowShortcuts.active.count == commands.count - 1, "关掉这一项后不再冲突，也不再注册")
+        conflicted.windowShortcuts.shortcuts[0].hotkey.enabled = true; conflicted.windowShortcuts.enabled = false
+        check(conflicted.validationError() == nil, "总开关关闭时不占用按键，也不算冲突")
+        var doubled = UserSettings.defaults
+        doubled.windowShortcuts.enabled = true
+        doubled.windowShortcuts.shortcuts[1].hotkey = doubled.windowShortcuts.shortcuts[0].hotkey
+        check(doubled.validationError() != nil, "两个窗口命令不能用同一个按键")
+        for invalid in [MenuBarHotkey(keyCode: 0, modifiers: [], enabled: true), MenuBarHotkey(keyCode: 0, modifiers: .shift, enabled: true),
+                        MenuBarHotkey(keyCode: KeyChoice.modifierOnly, modifiers: .option, enabled: true)] {
+            var bad = UserSettings.defaults
+            bad.windowShortcuts.enabled = true
+            bad.windowShortcuts.shortcuts[0].hotkey = invalid
+            check(bad.validationError() != nil, "窗口快捷键不能占用普通打字按键，也不能只按修饰键")
+        }
+        var broken = UserSettings.defaults
+        broken.windowShortcuts.enabled = true
+        broken.windowShortcuts.shortcuts[2].hotkey = MenuBarHotkey(keyCode: 48, modifiers: .option, enabled: true)
+        broken.windowShortcuts.shortcuts[3].hotkey = MenuBarHotkey(keyCode: 0, modifiers: [], enabled: true)
+        let mended = broken.repaired()
+        check(mended.validationError() == nil && mended.windowShortcuts.enabled, "修复后设置有效，总开关不变")
+        check(!mended.windowShortcuts.shortcuts[2].hotkey.enabled && !mended.windowShortcuts.shortcuts[3].hotkey.enabled && mended.windowShortcuts.active.count == commands.count - 2, "修复时只关闭冲突或无效的那几项")
+
+        // Saved settings
+        var custom = WindowShortcutSettings()
+        custom.enabled = true
+        custom.shortcuts = [WindowShortcut(command: .center, hotkey: WindowLayoutCommand.leftHalf.defaultHotkey), WindowShortcut(command: .center, hotkey: .toggleDefault)]
+        let customData = try? JSONEncoder().encode(custom)
+        let decoded = customData.flatMap { try? JSONDecoder().decode(WindowShortcutSettings.self, from: $0) }
+        check(decoded?.enabled == true && decoded?.shortcuts.map(\.command) == commands, "读取时补上缺的命令、去掉重复的命令，顺序固定")
+        check(decoded?.shortcuts.first(where: { $0.command == .center })?.hotkey == WindowLayoutCommand.leftHalf.defaultHotkey, "保留保存的按键")
+        check(decoded?.shortcuts.first(where: { $0.command == .leftHalf })?.hotkey.enabled == false, "补上的命令的默认按键已被占用时先关闭")
+        check(decoded?.shortcuts.first(where: { $0.command == .rightHalf })?.hotkey == WindowLayoutCommand.rightHalf.defaultHotkey, "补上的其他命令用默认按键")
+        let encoded = (try? JSONEncoder().encode(settings)) ?? Data()
+        check((try? JSONDecoder().decode(UserSettings.self, from: encoded))?.windowShortcuts == settings.windowShortcuts, "保存后读回来不变")
+        var object = ((try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any]) ?? [:]
+        func decodedSettings() -> UserSettings? {
+            (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? JSONDecoder().decode(UserSettings.self, from: $0) }
+        }
+        object.removeValue(forKey: "windowShortcuts")
+        check(decodedSettings()?.windowShortcuts == WindowShortcutSettings(), "旧版设置读进来时窗口快捷键保持关闭")
+        object["windowShortcuts"] = "坏值"
+        check(decodedSettings()?.windowShortcuts == WindowShortcutSettings() && decodedSettings()?.menuBar.toggleHotkey.enabled == true, "这一项损坏时不影响其他设置")
+        check(SettingSearchIndex.results("四分屏").first?.title == "启用全局窗口快捷键" && SettingSearchIndex.results("四分屏").first?.section == 1, "设置搜索可以找到全局窗口快捷键")
     }
     static func verifyThreading() {
         // The key tap decides on its own thread, from what the main thread last published.

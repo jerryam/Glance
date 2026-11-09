@@ -183,6 +183,82 @@ struct DockPreviewSettings: Codable, Equatable {
     }
 }
 
+/// 设置 › 搜索与按键 › 全局窗口快捷键: what a shortcut does to the window in front, without opening the panel.
+enum WindowLayoutCommand: String, CaseIterable, Identifiable, Codable {
+    case leftHalf, rightHalf, topHalf, bottomHalf
+    case topLeft, topRight, bottomLeft, bottomRight
+    case leftThird, centerThird, rightThird
+    case maximize, center, restore
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .leftHalf: return "左半屏"; case .rightHalf: return "右半屏"; case .topHalf: return "上半屏"; case .bottomHalf: return "下半屏"
+        case .topLeft: return "左上四分之一"; case .topRight: return "右上四分之一"
+        case .bottomLeft: return "左下四分之一"; case .bottomRight: return "右下四分之一"
+        case .leftThird: return "左三分之一"; case .centerThird: return "中间三分之一"; case .rightThird: return "右三分之一"
+        case .maximize: return "填满屏幕"; case .center: return "居中"; case .restore: return "还原"
+        }
+    }
+    /// nil for 还原, which goes back to a remembered place rather than to a place on the screen.
+    var kind: WindowArrangement.Kind? {
+        switch self {
+        case .leftHalf: return .left; case .rightHalf: return .right; case .topHalf: return .top; case .bottomHalf: return .bottom
+        case .topLeft: return .topLeft; case .topRight: return .topRight; case .bottomLeft: return .bottomLeft; case .bottomRight: return .bottomRight
+        case .leftThird: return .leftThird; case .centerThird: return .centerThird; case .rightThird: return .rightThird
+        case .maximize: return .maximize; case .center: return .center; case .restore: return nil
+        }
+    }
+    /// ⌃⌥ with the arrows for halves, U I J K for quarters, D F G for thirds, Return to fill, C to centre, Delete to restore.
+    var defaultHotkey: MenuBarHotkey {
+        let code: UInt32
+        switch self {
+        case .leftHalf: code = 123; case .rightHalf: code = 124; case .topHalf: code = 126; case .bottomHalf: code = 125
+        case .topLeft: code = 32; case .topRight: code = 34; case .bottomLeft: code = 38; case .bottomRight: code = 40
+        case .leftThird: code = 2; case .centerThird: code = 3; case .rightThird: code = 5
+        case .maximize: code = 36; case .center: code = 8; case .restore: code = 51
+        }
+        return MenuBarHotkey(keyCode: code, modifiers: [.control, .option], enabled: true)
+    }
+    /// How the hotkey registry knows this command; the menu bar commands use the slots below these.
+    static let firstSlot = 10
+    var slot: Int { Self.firstSlot + (Self.allCases.firstIndex(of: self) ?? 0) }
+    init?(slot: Int) {
+        let index = slot - Self.firstSlot
+        guard Self.allCases.indices.contains(index) else { return nil }
+        self = Self.allCases[index]
+    }
+}
+struct WindowShortcut: Codable, Equatable, Identifiable {
+    let command: WindowLayoutCommand
+    var hotkey: MenuBarHotkey
+    var id: String { command.rawValue }
+}
+struct WindowShortcutSettings: Codable, Equatable {
+    /// Off until asked for: turned on, it claims fourteen key combinations in every app.
+    var enabled = false
+    var shortcuts = WindowLayoutCommand.allCases.map { WindowShortcut(command: $0, hotkey: $0.defaultHotkey) }
+    /// The shortcuts to register.
+    var active: [WindowShortcut] { enabled ? shortcuts.filter { $0.hotkey.enabled } : [] }
+    init() {}
+    private enum CodingKeys: String, CodingKey { case enabled, shortcuts }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        var saved: [WindowLayoutCommand: WindowShortcut] = [:]
+        for shortcut in try c.decodeIfPresent([WindowShortcut].self, forKey: .shortcuts) ?? [] where saved[shortcut.command] == nil {
+            saved[shortcut.command] = shortcut
+        }
+        // One per command, in a fixed order. A command added later starts on its own key, unless that key is taken.
+        let taken = Set(saved.values.filter { $0.hotkey.enabled }.map { $0.hotkey.combinationKey })
+        shortcuts = WindowLayoutCommand.allCases.map { command in
+            if let shortcut = saved[command] { return shortcut }
+            var shortcut = WindowShortcut(command: command, hotkey: command.defaultHotkey)
+            if taken.contains(shortcut.hotkey.combinationKey) { shortcut.hotkey.enabled = false }
+            return shortcut
+        }
+    }
+}
+
 struct AdvancedSettings: Codable, Equatable {
     var preferencesRevision = 2
     var inputMode: PanelInputMode = .search

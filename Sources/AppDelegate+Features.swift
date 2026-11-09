@@ -13,8 +13,9 @@ extension AppDelegate {
         if reconfigure {
             // Menu bar shortcuts are only claimed where hiding works, so they never take keys for nothing.
             let bar = settings.value.menuBar
-            let extras: [(slot: Int, hotkey: MenuBarHotkey)] = menuBar.available && bar.enabled
+            var extras: [(slot: Int, hotkey: MenuBarHotkey)] = menuBar.available && bar.enabled
                 ? [(0, bar.toggleHotkey), (1, bar.showAllHotkey)] : []
+            extras += settings.value.windowShortcuts.active.map { (slot: $0.command.slot, hotkey: $0.hotkey) }
             hotkeys.configure(settings.value.shortcuts, extras: extras)
         }
         hotkeys.setSuspended(recording || ignored)
@@ -24,6 +25,25 @@ extension AppDelegate {
         guard nativeSwitcherDisabled != disabled else { return }
         nativeSwitcherDisabled = disabled
         NativeBridge.setSystemAppSwitcher(enabled: !disabled)
+    }
+
+    // MARK: Global window shortcuts
+
+    /// Nothing is on screen to say why a shortcut did nothing, so a failure beeps, like a failed switch from the
+    /// Dock preview, and the reason goes to the diagnostics.
+    func performWindowShortcut(_ command: WindowLayoutCommand) {
+        // With the panel open the selected window is the one meant, and the panel can report the outcome.
+        if showing { perform(command.action); return }
+        // 一瞥 does not arrange its own windows: its accessibility answers would have to come from this main thread.
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier, pid != ProcessInfo.processInfo.processIdentifier else {
+            windowShortcutError = "前台没有可以调整的窗口（一瞥自己的窗口除外）。"
+            NSSound.beep()
+            return
+        }
+        WindowControl.performOnFocusedWindow(command, of: pid) { [weak self] error in
+            self?.windowShortcutError = error ?? ""
+            if error != nil { NSSound.beep() }
+        }
     }
 
     // MARK: Pinned windows

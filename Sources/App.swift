@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panelClickMonitor: Any?
     var quickCommitCount = 0
     var waitedCommitCount = 0
+    /// Why the last global window shortcut did nothing; empty when it worked.
+    var windowShortcutError = ""
     var previewTimer: Timer?
     var backgroundTimer: Timer?
     var panelRefreshTimer: Timer?
@@ -149,7 +151,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         hotkeys.onTrigger = { [weak self] index, reverse in self?.trigger(index: index, reverse: reverse) }
         hotkeys.onRelease = { [weak self] in self?.modifiersChanged(Self.logicalModifierFlags) }
-        hotkeys.onExtra = { [weak self] slot in self?.menuBar.toggle(all: slot == 1) }
+        hotkeys.onExtra = { [weak self] slot in
+            if let command = WindowLayoutCommand(slot: slot) { self?.performWindowShortcut(command) }
+            else { self?.menuBar.toggle(all: slot == 1) }
+        }
         launcher.onUpdate = { [weak self] in self?.updateExtraItems() }
         launcher.refreshIfNeeded()
         setupDockPreview()
@@ -691,6 +696,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "windowDiscovery": ["suppressedSurfaces": engine.suppressedSurfaceCount, "unavailableWindowLists": engine.unavailableWindowListCount,
                              "lateScans": engine.lateScanCount, "idleRefreshes": idleRefreshCount],
          "quickRelease": ["atOnce": quickCommitCount, "waited": waitedCommitCount],
+         "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
@@ -1026,6 +1032,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .tileRight: feedback = "已把“\(title)”放到右半屏。"
         case .maximize: feedback = "已让“\(title)”填满屏幕。"
         case .nextScreen: feedback = "已把“\(title)”移到下一块屏幕。"
+        case .arrange: feedback = "已调整“\(title)”的位置。"
+        case .restoreFrame: feedback = "已把“\(title)”还原到调整之前的位置。"
         case .focus: feedback = ""
         }
         state.setMessage(feedback); relayout()

@@ -152,7 +152,10 @@ enum NativeSwitcherPolicy {
 
 /// Target frames for the window arrangement commands, in top-left screen coordinates.
 enum WindowArrangement {
-    enum Kind { case left, right, maximize, nextScreen }
+    enum Kind {
+        case left, right, top, bottom, topLeft, topRight, bottomLeft, bottomRight
+        case leftThird, centerThird, rightThird, maximize, center, nextScreen
+    }
     static func screenIndex(of window: WindowRect, in screens: [WindowRect]) -> Int {
         let centerX = window.x + window.width / 2, centerY = window.y + window.height / 2
         if let index = screens.firstIndex(where: { $0.contains(x: centerX, y: centerY) }) { return index }
@@ -166,11 +169,28 @@ enum WindowArrangement {
         guard !screens.isEmpty else { return nil }
         let index = screenIndex(of: window, in: screens)
         let screen = screens[index]
-        let half = (screen.width / 2).rounded(.down)
+        let half = (screen.width / 2).rounded(.down), halfHeight = (screen.height / 2).rounded(.down)
+        let rightX = screen.x + screen.width - half, bottomY = screen.y + screen.height - halfHeight
+        // The middle third takes what does not divide evenly, so the three meet without a gap.
+        let third = (screen.width / 3).rounded(.down)
         switch kind {
         case .left: return WindowRect(x: screen.x, y: screen.y, width: half, height: screen.height)
-        case .right: return WindowRect(x: screen.x + screen.width - half, y: screen.y, width: half, height: screen.height)
+        case .right: return WindowRect(x: rightX, y: screen.y, width: half, height: screen.height)
+        case .top: return WindowRect(x: screen.x, y: screen.y, width: screen.width, height: halfHeight)
+        case .bottom: return WindowRect(x: screen.x, y: bottomY, width: screen.width, height: halfHeight)
+        case .topLeft: return WindowRect(x: screen.x, y: screen.y, width: half, height: halfHeight)
+        case .topRight: return WindowRect(x: rightX, y: screen.y, width: half, height: halfHeight)
+        case .bottomLeft: return WindowRect(x: screen.x, y: bottomY, width: half, height: halfHeight)
+        case .bottomRight: return WindowRect(x: rightX, y: bottomY, width: half, height: halfHeight)
+        case .leftThird: return WindowRect(x: screen.x, y: screen.y, width: third, height: screen.height)
+        case .centerThird: return WindowRect(x: screen.x + third, y: screen.y, width: screen.width - third * 2, height: screen.height)
+        case .rightThird: return WindowRect(x: screen.x + screen.width - third, y: screen.y, width: third, height: screen.height)
         case .maximize: return screen
+        case .center:
+            // Keeps the window's size, and shrinks it only when it would not fit.
+            let width = min(window.width, screen.width), height = min(window.height, screen.height)
+            return WindowRect(x: screen.x + ((screen.width - width) / 2).rounded(.down), y: screen.y + ((screen.height - height) / 2).rounded(.down),
+                              width: width, height: height)
         case .nextScreen:
             guard screens.count > 1 else { return nil }
             let next = screens[(index + 1) % screens.count]
@@ -181,6 +201,39 @@ enum WindowArrangement {
             let y = min(max(next.y + relativeY * next.height, next.y), next.y + next.height - height)
             return WindowRect(x: x, y: y, width: width, height: height)
         }
+    }
+    /// Where 还原 puts a window. The screen it was on may be gone by now: a place outside every screen
+    /// becomes the middle of the screen the window is on, at its saved size.
+    static func restored(_ saved: WindowRect, window: WindowRect, screens: [WindowRect]) -> WindowRect {
+        let centerX = saved.x + saved.width / 2, centerY = saved.y + saved.height / 2
+        if screens.isEmpty || screens.contains(where: { $0.contains(x: centerX, y: centerY) }) { return saved }
+        return frame(.center, window: WindowRect(x: window.x, y: window.y, width: saved.width, height: saved.height), screens: screens) ?? saved
+    }
+}
+
+/// Where each window was before 一瞥 arranged it, for 还原. Several arrangements in a row keep the first place;
+/// moving the window by hand in between starts over from there.
+struct WindowFrameMemory {
+    private struct Entry { let original: WindowRect; let applied: WindowRect }
+    private var entries: [UInt32: Entry] = [:]
+    private var order: [UInt32] = []
+    static let limit = 64
+    /// Points of difference that still count as the same place.
+    static let tolerance = 2.0
+    mutating func recordArrangement(of window: UInt32, from current: WindowRect, to applied: WindowRect) {
+        let kept = entries[window].flatMap { Self.same($0.applied, current) ? $0.original : nil }
+        entries[window] = Entry(original: kept ?? current, applied: applied)
+        order.removeAll { $0 == window }
+        order.append(window)
+        while order.count > Self.limit { entries.removeValue(forKey: order.removeFirst()) }
+    }
+    func original(of window: UInt32) -> WindowRect? { entries[window]?.original }
+    mutating func forget(_ window: UInt32) {
+        entries.removeValue(forKey: window)
+        order.removeAll { $0 == window }
+    }
+    private static func same(_ a: WindowRect, _ b: WindowRect) -> Bool {
+        abs(a.x - b.x) <= tolerance && abs(a.y - b.y) <= tolerance && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
     }
 }
 
@@ -486,6 +539,7 @@ enum SettingSearchIndex {
         .init(1, "按 Shift 单独反向选择", "反向 上一个 单修饰键"),
         .init(1, "使用方向键选择窗口", "arrow"), .init(1, "使用 H / J / K / L 选择窗口", "vim"),
         .init(1, "面板中的快捷键 · 点击按键可重新录制", "录制 关闭 退出 最小化 按键 半屏 填满 屏幕 置顶"),
+        .init(1, "启用全局窗口快捷键", "半屏 四分屏 三分屏 分屏 居中 还原 窗口位置 全局 snap tile"),
         .init(2, "外观", "液态玻璃 liquid glass"), .init(2, "显示样式", "图标 缩略图 列表 style"),
         .init(2, "主题", "浅色 深色 跟随系统 theme"), .init(2, "显示标题", "窗口 应用 名称"),
         .init(2, "过长标题省略位置", "截断 开头 中间 末尾"),

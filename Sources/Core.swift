@@ -214,12 +214,13 @@ struct UserSettings: Codable, Equatable {
     var advanced = AdvancedSettings()
     var menuBar = MenuBarSettings()
     var dockPreview = DockPreviewSettings()
+    var windowShortcuts = WindowShortcutSettings()
     static let defaults = UserSettings()
 
     init() {}
     private enum CodingKeys: String, CodingKey {
         case style, theme, adaptiveThumbnails, thumbnailWidth, showMinimized, showHidden, livePreviews
-        case mouseHoverEnabled, showWindowlessApps, exclusions, shortcuts, advanced, menuBar, dockPreview
+        case mouseHoverEnabled, showWindowlessApps, exclusions, shortcuts, advanced, menuBar, dockPreview, windowShortcuts
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -237,6 +238,7 @@ struct UserSettings: Codable, Equatable {
         advanced = try values.decodeIfPresent(AdvancedSettings.self, forKey: .advanced) ?? AdvancedSettings()
         menuBar = (try? values.decodeIfPresent(MenuBarSettings.self, forKey: .menuBar)) ?? MenuBarSettings()
         dockPreview = (try? values.decodeIfPresent(DockPreviewSettings.self, forKey: .dockPreview)) ?? DockPreviewSettings()
+        windowShortcuts = (try? values.decodeIfPresent(WindowShortcutSettings.self, forKey: .windowShortcuts)) ?? WindowShortcutSettings()
     }
 
     func validationError() -> String? {
@@ -262,6 +264,10 @@ struct UserSettings: Codable, Equatable {
         for hotkey in menuBar.enabledHotkeys {
             guard hotkey.isValid else { return "菜单栏快捷键 \(hotkey.label) 需要包含 ⌥、⌃ 或 ⌘，并且不能只按修饰键。" }
             guard combinations.insert(hotkey.combinationKey).inserted else { return "菜单栏快捷键 \(hotkey.label) 与其他快捷键重复。" }
+        }
+        for shortcut in windowShortcuts.active {
+            guard shortcut.hotkey.isValid else { return "窗口快捷键 \(shortcut.hotkey.label) 需要包含 ⌥、⌃ 或 ⌘，并且不能只按修饰键。" }
+            guard combinations.insert(shortcut.hotkey.combinationKey).inserted else { return "窗口快捷键 \(shortcut.hotkey.label) 与其他快捷键重复。" }
         }
         var panelKeys = Set<String>()
         guard Set(advanced.bindings.map(\.command)).count == advanced.bindings.count else { return "面板操作不能重复配置。" }
@@ -307,6 +313,12 @@ struct UserSettings: Codable, Equatable {
         for keyPath in [\MenuBarSettings.toggleHotkey, \MenuBarSettings.showAllHotkey] where result.menuBar[keyPath: keyPath].enabled {
             let hotkey = result.menuBar[keyPath: keyPath]
             if !hotkey.isValid || !combinations.insert(hotkey.combinationKey).inserted { result.menuBar[keyPath: keyPath].enabled = false }
+        }
+        if result.windowShortcuts.enabled {
+            for index in result.windowShortcuts.shortcuts.indices where result.windowShortcuts.shortcuts[index].hotkey.enabled {
+                let hotkey = result.windowShortcuts.shortcuts[index].hotkey
+                if !hotkey.isValid || !combinations.insert(hotkey.combinationKey).inserted { result.windowShortcuts.shortcuts[index].hotkey.enabled = false }
+            }
         }
         var commands = Set<PanelCommand>()
         result.advanced.bindings = result.advanced.bindings.filter { commands.insert($0.command).inserted }
