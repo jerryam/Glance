@@ -212,22 +212,26 @@ enum WindowArrangement {
 }
 
 /// Where each window was before 一瞥 arranged it, for 还原. Several arrangements in a row keep the first place;
-/// moving the window by hand in between starts over from there.
+/// moving the window by hand in between starts over from there. A window's number alone does not prove it is the
+/// same window: Apple promises it is unique within the session, not that a closed window's number stays unused.
+/// So a place also belongs to the process that owned the window, which a new window of another app does not match.
 struct WindowFrameMemory {
-    private struct Entry { let original: WindowRect; let applied: WindowRect }
+    private struct Entry { let owner: Int32; let original: WindowRect; let applied: WindowRect }
     private var entries: [UInt32: Entry] = [:]
     private var order: [UInt32] = []
     static let limit = 64
     /// Points of difference that still count as the same place.
     static let tolerance = 2.0
-    mutating func recordArrangement(of window: UInt32, from current: WindowRect, to applied: WindowRect) {
-        let kept = entries[window].flatMap { Self.same($0.applied, current) ? $0.original : nil }
-        entries[window] = Entry(original: kept ?? current, applied: applied)
+    mutating func recordArrangement(of window: UInt32, owner: Int32, from current: WindowRect, to applied: WindowRect) {
+        let kept = entries[window].flatMap { $0.owner == owner && Self.same($0.applied, current) ? $0.original : nil }
+        entries[window] = Entry(owner: owner, original: kept ?? current, applied: applied)
         order.removeAll { $0 == window }
         order.append(window)
         while order.count > Self.limit { entries.removeValue(forKey: order.removeFirst()) }
     }
-    func original(of window: UInt32) -> WindowRect? { entries[window]?.original }
+    func original(of window: UInt32, owner: Int32) -> WindowRect? {
+        entries[window].flatMap { $0.owner == owner ? $0.original : nil }
+    }
     mutating func forget(_ window: UInt32) {
         entries.removeValue(forKey: window)
         order.removeAll { $0 == window }

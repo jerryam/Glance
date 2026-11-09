@@ -257,6 +257,9 @@ final class WindowEngine: ObservableObject {
             return
         }
         if notification == kAXUIElementDestroyedNotification {
+            for handle in windows where handle.ax.map({ CFEqual($0, window) }) == true {
+                if let id = handle.descriptor.windowID { WindowControl.forgetFrame(of: id) }
+            }
             windows.removeAll { handle in handle.ax.map { CFEqual($0, window) } == true }
             axThread.perform { [weak self] in
                 guard let self else { return }
@@ -834,7 +837,8 @@ enum WindowControl {
         // So that 还原 can take a window back from a layout, as it can from any other arrangement.
         if let window = NativeBridge.windowID(ax), let current {
             let applied = axFrame(ax).map { windowRect($0) } ?? target
-            withFrameMemory { $0.recordArrangement(of: window, from: current, to: applied) }
+            let pid = ownerPID(ax)
+            withFrameMemory { $0.recordArrangement(of: window, owner: pid, from: current, to: applied) }
         }
         return nil
     }
@@ -951,13 +955,15 @@ enum WindowControl {
         if let window = NativeBridge.windowID(ax) {
             // Where the window really ended up, since an app may round to its own grid: a later difference means the user moved it.
             let applied = axFrame(ax).map { windowRect($0) } ?? target
-            withFrameMemory { $0.recordArrangement(of: window, from: current, to: applied) }
+            let pid = ownerPID(ax)
+            withFrameMemory { $0.recordArrangement(of: window, owner: pid, from: current, to: applied) }
         }
         return nil
     }
     private static func restoreFrame(_ ax: AXUIElement, screens: [WindowRect]?) -> String? {
         if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
-        guard let window = NativeBridge.windowID(ax), let saved = withFrameMemory({ $0.original(of: window) }) else {
+        let pid = ownerPID(ax)
+        guard let window = NativeBridge.windowID(ax), let saved = withFrameMemory({ $0.original(of: window, owner: pid) }) else {
             return "这个窗口没有可还原的位置：一瞥还没有调整过它。"
         }
         let current = axFrame(ax).map { windowRect($0) } ?? saved
@@ -971,6 +977,14 @@ enum WindowControl {
     private static func withFrameMemory<T>(_ body: (inout WindowFrameMemory) -> T) -> T {
         frameMemoryLock.lock(); defer { frameMemoryLock.unlock() }
         return body(&frameMemory)
+    }
+    /// A closed window's number may go to a new window later, which must not inherit its place.
+    static func forgetFrame(of window: UInt32) { withFrameMemory { $0.forget(window) } }
+    /// The process a window belongs to. It comes from the element itself, so this does not wait for the app.
+    private static func ownerPID(_ ax: AXUIElement) -> Int32 {
+        var pid: Int32 = 0
+        AXUIElementGetPid(ax, &pid)
+        return pid
     }
     private static func windowRect(_ frame: CGRect) -> WindowRect {
         WindowRect(x: Double(frame.minX), y: Double(frame.minY), width: Double(frame.width), height: Double(frame.height))

@@ -8,13 +8,14 @@
 - Chromium 窗口 id 变成文本这一点来自 Chromium 的 `scripting.sdef`、[Keyboard Maestro 论坛](https://forum.keyboardmaestro.com/t/frontbrowserurl-doesnt-work-in-opera/31924)和 Raycast 的 Arc 扩展。Opera 的 `active tab index` 和 `select` 没有查实。
 - 重新启动、关机和退出登录发给 loginwindow 的事件参考 Apple 的 [Technical Q&A QA1134](https://developer.apple.com/library/mac/qa/qa1134/_index.html)。CoreTests 用 SDK 的常量核对代码：`rrst` 是 `kAEShowRestartDialog`，`rsdn` 是 `kAEShowShutdownDialog`，`logo` 是 `kAELogOut`，并确认一瞥没有使用直接执行的 `rest`、`shut` 和 `rlgo`。它们是否真的弹出对话框还要实机确认。
 - 算式没有用 `NSExpression`：它遇到错误的输入会抛异常，也能按名称调用方法。
+- “还原”记住的位置同时认窗口编号和所属进程，窗口关闭时丢弃。Apple 只说[窗口编号在当前用户会话里唯一](https://developer.apple.com/documentation/coregraphics/kcgwindownumber)，没说窗口关闭后编号会不会再分配，所以按可能重用来处理。这个修复来自 PR #4 的审查，只提交在 `release/2.5.0` 上，`feature/window-shortcuts` 没有带上。
 
 ## 已验证
 
 GitHub Actions 上，没有真实窗口、权限和其他应用：
 
 - `build.sh` 编译通过，没有错误和警告。
-- 九百三十六项核心检查全部通过，其中多音字和拼音用的是 macOS 真实的转写接口。
+- 九百三十九项核心检查全部通过，其中多音字和拼音用的是 macOS 真实的转写接口。
 - `scripts/crash-restart-check.sh` 启动构建好的应用：`SIGSEGV` 和 `SIGABRT` 后重新打开并记录次数，`SIGTERM` 后保持关闭，连续崩溃后停止重开。信号是从外部发送的，不是应用自己崩溃。
 
 每一项都有自己的分支，都单独通过了 CI。
@@ -27,6 +28,7 @@ GitHub Actions 上，没有真实窗口、权限和其他应用：
 
 - 打开后试半屏、四分之一屏、三分之一屏、居中和还原。
 - 失败时响一声，原因在 `windowShortcuts.lastError`。
+- 调整一个窗口后关闭它，再在新窗口上按“还原”，新窗口不会被挪动。
 
 ### 切换列表里的设置窗口
 
@@ -100,3 +102,4 @@ GitHub Actions 上，没有真实窗口、权限和其他应用：
 - 窗口布局不打开没有运行的应用，不恢复已关闭的窗口，不处理全屏窗口，不恢复前后顺序。
 - Dock 预览的悬停画面是截图，不会把真实窗口提到前面。
 - 拒绝“自动化”权限和在系统对话框里点取消都可能只响一声，区分不开。
+- 如果应用不发窗口关闭通知，同一个进程的新窗口又拿到了旧窗口的编号，“还原”仍可能认错窗口。
