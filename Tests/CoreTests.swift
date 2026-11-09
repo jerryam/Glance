@@ -270,7 +270,54 @@ struct CoreTests {
         verifyMenuBar()
         verifyPinsAndRecovery()
         verifyOptimizations()
+        verifyThreading()
         print("\(passed) checks passed")
+    }
+    static func verifyThreading() {
+        // The key tap decides on its own thread, from what the main thread last published.
+        var keys = PanelKeySnapshot(held: .option, bindings: PanelBinding.defaults, triggers: UserSettings.defaults.shortcuts)
+        check(!PanelKeySnapshot().captures(code: PanelCommand.cancel.defaultCode, flags: []), "主线程还没发布状态时，所有按键都放行")
+        check(keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "面板不是关键窗口时，拦截线程接住 Esc")
+        check(keys.captures(code: PanelCommand.confirm.defaultCode, flags: []), "面板不是关键窗口时，拦截线程接住回车")
+        check(keys.captures(code: PanelCommand.next.defaultCode, flags: PanelCommand.next.defaultModifiers), "面板不是关键窗口时，拦截线程接住下一项")
+        check(!keys.captures(code: 48, flags: .option), "已注册的快捷键走系统路径，拦截线程不抢，避免跳两格")
+        check(!keys.captures(code: 0, flags: []), "普通文字不被拦截线程拿走")
+        keys.triggers = []
+        check(keys.captures(code: 48, flags: .option), "快捷键暂停时，这个组合不再算已注册")
+        keys.panelIsKey = true
+        check(!keys.captures(code: PanelCommand.confirm.defaultCode, flags: []), "面板是关键窗口时，回车走 AppKit，只处理一次")
+        check(keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "面板是关键窗口时，Esc 仍然能取消")
+        keys.panelIsKey = false; keys.searching = true
+        check(!keys.captures(code: PanelCommand.confirm.defaultCode, flags: []), "搜索时不把别的应用的回车抢过来")
+        check(keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "搜索时 Esc 仍然能取消")
+        keys.searching = false; keys.markedText = true
+        check(!keys.captures(code: PanelCommand.cancel.defaultCode, flags: []), "输入法组合文字时，Esc 交给输入法")
+
+        // The waits below hold the main thread, as a slow app would have: the work must get done regardless.
+        let thread = BackgroundRunLoop(name: "检查", qos: .userInitiated)
+        let finished = DispatchSemaphore(value: 0), sourceFired = DispatchSemaphore(value: 0)
+        var order: [Int] = [], offMain = false
+        thread.perform { order.append(1); offMain = !Thread.isMainThread }
+        thread.perform { order.append(2); finished.signal() }
+        check(finished.wait(timeout: .now() + 5) == .success, "主线程等待时，后台线程照常工作")
+        check(order == [1, 2], "后台线程按交给它的顺序工作")
+        check(offMain, "这些工作不在主线程上运行")
+        // Event taps and accessibility observers reach their callbacks as run loop sources.
+        var context = CFRunLoopSourceContext(version: 0, info: Unmanaged.passUnretained(sourceFired).toOpaque(), retain: nil, release: nil, copyDescription: nil,
+                                             equal: nil, hash: nil, schedule: nil, cancel: nil, perform: { info in
+            if let info, !Thread.isMainThread { Unmanaged<DispatchSemaphore>.fromOpaque(info).takeUnretainedValue().signal() }
+        })
+        let source: CFRunLoopSource = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &context)
+        thread.add(source)
+        thread.perform { CFRunLoopSourceSignal(source) }
+        check(sourceFired.wait(timeout: .now() + 5) == .success, "事件来源的回调在后台线程上运行，不需要主线程")
+        thread.remove(source)
+        thread.perform { finished.signal() }
+        check(finished.wait(timeout: .now() + 5) == .success, "移除事件来源后，线程继续工作，不会因为没事可等而退出")
+        thread.finish()
+        var waits = 0
+        while !thread.isFinished && waits < 500 { Thread.sleep(forTimeInterval: 0.01); waits += 1 }
+        check(thread.isFinished, "结束后线程退出")
     }
     static func verifyOptimizations() {
         check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: false), "列表刚读过且没有新事件时，快速松键直接切换")
