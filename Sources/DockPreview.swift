@@ -299,20 +299,28 @@ final class DockPreviewController {
         refreshWindows? { [weak self] in
             guard let self, self.generation == generation, self.isVisible, let shown = self.shown else { return }
             let fresh = self.list(for: shown)
-            guard fresh.map(\.id) != self.state.items.map(\.id) else { return }
+            if fresh.map(\.id) == self.state.items.map(\.id) {
+                // Titles are only followed while the switcher is open, so this read may be the first to see a new one.
+                // Only the words change, unless the cards now need room for a title or no longer do.
+                if fresh.map(\.descriptor.title) == self.state.items.map(\.descriptor.title) { return }
+                if self.showsTitles(fresh, target: shown) == self.state.showsTitles { self.state.items = fresh; return }
+            }
             if fresh.isEmpty { self.hide(reason: "windows closed"); return }
             self.fill(fresh, target: shown)
             self.panel?.setFrame(self.position(size: self.contentSize(for: shown), target: shown), display: true)
         }
     }
 
+    private func showsTitles(_ items: [WindowHandle], target: Target) -> Bool {
+        items.contains { !$0.descriptor.title.isEmpty && $0.descriptor.title != target.name && $0.descriptor.title != $0.descriptor.appName }
+    }
     private func fill(_ items: [WindowHandle], target: Target) {
         state.appName = target.name
         state.appIcon = target.icon ?? items.first?.icon
         state.message = ""
         state.canCapture = CGPreflightScreenCaptureAccess()
         state.hoveredID = nil
-        state.showsTitles = items.contains { !$0.descriptor.title.isEmpty && $0.descriptor.title != target.name && $0.descriptor.title != $0.descriptor.appName }
+        state.showsTitles = showsTitles(items, target: target)
         state.items = items
         var images: [String: NSImage] = [:]
         for item in items { if let image = cachedImage?(item.id) { images[item.id] = image } }
