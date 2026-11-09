@@ -3,7 +3,8 @@ import SwiftUI
 import ApplicationServices
 
 /// Dock 预览: rest the pointer on an app in the Dock and its windows appear beside the icon, like the
-/// thumbnails on the Windows taskbar. Click a window to switch to it; the × on a card closes it.
+/// thumbnails on the Windows taskbar. Click a window to switch to it; the × on a card or a middle click closes
+/// it, and a right click offers the rest. Resting on a card shows that window's picture at the window's own place.
 ///
 /// The Dock tells Accessibility which icon is under the pointer (its list's selected child), and that
 /// notification is the only signal used: no event tap and no polling of the Dock. While the panel is
@@ -14,7 +15,7 @@ final class DockPreviewState: ObservableObject {
     @Published var items: [WindowHandle] = []
     @Published var images: [String: NSImage] = [:]
     @Published var flow = FlowLayout(rows: [], widths: [], thumbnailHeight: 112, gap: DockPreviewMetrics.gap)
-    @Published var hoveredID: String?
+    @Published var hoveredID: String? { didSet { if hoveredID != oldValue { onHover?(hoveredID) } } }
     @Published var message = ""
     /// Without Screen Recording the cards show the app icon instead of a picture.
     @Published var canCapture = true
@@ -22,6 +23,9 @@ final class DockPreviewState: ObservableObject {
     @Published var showsTitles = true
     var onOpen: ((WindowHandle) -> Void)?
     var onClose: ((WindowHandle) -> Void)?
+    /// The right-click menu's other choices.
+    var onAction: ((WindowHandle, WindowAction) -> Void)?
+    var onHover: ((String?) -> Void)?
 }
 
 enum DockPreviewMetrics {
@@ -65,8 +69,8 @@ final class DockPreviewController {
     /// True while the switcher is open: the two never show together.
     var isBlocked: (() -> Bool)?
     var onFocus: ((WindowHandle) -> Void)?
-    /// Returns an error message, or nil when the window was asked to close.
-    var onClose: ((WindowHandle) -> String?)?
+    /// Runs a window action off the main thread; the answer (an error message, or nil) arrives on the main queue.
+    var perform: ((WindowAction, WindowHandle, @escaping (String?) -> Void) -> Void)?
     var appearance: NSAppearance? { didSet { panel?.appearance = appearance } }
     /// Development log (`--dock-preview-log`).
     var log: ((String) -> Void)?
@@ -96,10 +100,29 @@ final class DockPreviewController {
     private var generation = 0
     /// The Dock itself (its list of icons) when the preview opened, in screen coordinates.
     private var dockFrame: NSRect?
+    private var liveTimer: Timer?
+    private var middleClickMonitor: Any?
+    private var middleDownID: String?
+    /// When each card last asked for a new picture, so the cards take turns.
+    private var capturedAt: [String: TimeInterval] = [:]
+    private var lastPointer = NSPoint.zero
+    private var lastPointerMove: TimeInterval = 0
+    private var menuObservers: [NSObjectProtocol] = []
+    private var menuOpen = false
+    /// A picture only: it takes no clicks and moves no real window, so nothing needs putting back afterwards.
+    private var peekPanel: PreviewPanel?
+    private var peekImage: NSImageView?
+    private var peekWork: DispatchWorkItem?
+    private var peekedID: String?
 
     init() {
         state.onOpen = { [weak self] handle in self?.open(handle) }
         state.onClose = { [weak self] handle in self?.close(handle) }
+        state.onAction = { [weak self] handle, action in self?.act(action, on: handle) }
+        state.onHover = { [weak self] id in self?.hoverChanged(id) }
+        capture.receiveFull = { [weak self] id, image in self?.showPeek(id, image: image) }
+        menuObservers.append(NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in self?.menuOpen = true })
+        menuObservers.append(NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in self?.menuOpen = false })
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
@@ -172,6 +195,7 @@ final class DockPreviewController {
     deinit {
         detach()
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        menuObservers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     /// The Dock moved its highlight: to another icon, or off the icons altogether.
@@ -319,7 +343,8 @@ final class DockPreviewController {
         state.appIcon = target.icon ?? items.first?.icon
         state.message = ""
         state.canCapture = CGPreflightScreenCaptureAccess()
-        state.hoveredID = nil
+        // A refresh of the same app leaves the pointer on the same card.
+        if let hovered = state.hoveredID, !items.contains(where: { $0.id == hovered }) { state.hoveredID = nil }
         state.showsTitles = showsTitles(items, target: target)
         state.items = items
         var images: [String: NSImage] = [:]
@@ -333,6 +358,8 @@ final class DockPreviewController {
             self.storeImage?(id, image)
             if self.state.items.contains(where: { $0.id == id }) { self.state.images[id] = image }
         }
+        let now = ProcessInfo.processInfo.systemUptime
+        capturedAt = Dictionary(items.map { ($0.id, now) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// The largest thumbnails that keep every window within the screen beside the Dock.
@@ -440,6 +467,7 @@ final class DockPreviewController {
     func hide(reason: String = "") {
         pending?.cancel(); pending = nil
         stopWatching()
+        hidePeek()
         guard let panel, panel.isVisible else { shown = nil; return }
         panel.orderOut(nil)
         capture.cancel()
@@ -461,8 +489,27 @@ final class DockPreviewController {
         // A click anywhere else, the Dock icon included, closes the panel, as on Windows.
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             guard let self, let shown = self.shown else { return }
+            guard !self.menuTracking else { return }
             if Self.isNear(shown.iconFrame) { self.suppress(shown) }
             self.hide(reason: "click")
+        }
+        // Only a click on this panel: a middle click elsewhere goes to the global monitor above, like any other.
+        middleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { [weak self] event in
+            guard let self, event.window === self.panel, event.buttonNumber == 2 else { return event }
+            if event.type == .otherMouseDown { self.middleDownID = self.state.hoveredID; return nil }
+            let target = DockPreviewPolicy.middleClickTarget(down: self.middleDownID, up: self.state.hoveredID)
+            self.middleDownID = nil
+            if let target, let handle = self.state.items.first(where: { $0.id == target }) { self.close(handle) }
+            return nil
+        }
+        lastPointer = NSEvent.mouseLocation
+        lastPointerMove = ProcessInfo.processInfo.systemUptime
+        if settings.liveThumbnails {
+            let live = Timer(timeInterval: DockPreviewPolicy.liveTick, repeats: true) { [weak self] _ in self?.refreshLive() }
+            live.tolerance = 0.2
+            // The default mode alone: pictures wait while a menu is open on the panel.
+            RunLoop.main.add(live, forMode: .default)
+            liveTimer = live
         }
     }
 
@@ -470,13 +517,102 @@ final class DockPreviewController {
         watchTimer?.invalidate(); watchTimer = nil
         if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
         clickMonitor = nil
+        if let middleClickMonitor { NSEvent.removeMonitor(middleClickMonitor) }
+        middleClickMonitor = nil; middleDownID = nil
+        liveTimer?.invalidate(); liveTimer = nil
+    }
+
+    /// A menu on a card: the pointer may be anywhere in it, outside the panel, and the panel still has to stay.
+    private var menuTracking: Bool { menuOpen || RunLoop.main.currentMode == .eventTracking }
+
+    /// Asks for new pictures of the cards whose turn it is, and of the window being shown at its own place.
+    private func refreshLive() {
+        guard isVisible, state.canCapture else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        // A panel left open with nobody at the machine should not keep capturing.
+        guard now - lastPointerMove < DockPreviewPolicy.liveIdleLimit else { return }
+        let hovered = state.hoveredID
+        for id in DockPreviewPolicy.dueForRefresh(state.items.map(\.descriptor), hovered: hovered, capturedAt: capturedAt, now: now) {
+            guard let handle = state.items.first(where: { $0.id == id }) else { continue }
+            capturedAt[id] = now
+            capture.request(handle, urgent: id == hovered)
+        }
+        if let peekedID, peekedID == hovered, peekPanel?.isVisible == true, let handle = state.items.first(where: { $0.id == peekedID }) {
+            capture.request(handle, urgent: true, full: true)
+        }
+    }
+
+    // MARK: The window at its own place
+
+    private func peekCandidate(_ id: String?) -> WindowHandle? {
+        guard settings.peekWindow, state.canCapture, let id, let handle = state.items.first(where: { $0.id == id }),
+              DockPreviewPolicy.peekFrame(of: handle.descriptor) != nil else { return nil }
+        return handle
+    }
+
+    /// Rests before showing, so a pointer crossing the cards shows nothing, and before hiding, so the picture
+    /// does not blink on the way from one card to the next.
+    private func hoverChanged(_ id: String?) {
+        peekWork?.cancel(); peekWork = nil
+        guard isVisible else { hidePeek(); return }
+        let wanted = peekCandidate(id)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard let wanted else { self.hidePeek(); return }
+            guard self.isVisible, self.state.hoveredID == wanted.id else { return }
+            self.peekedID = wanted.id
+            self.capture.request(wanted, urgent: true, full: true)
+        }
+        peekWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (wanted == nil ? DockPreviewPolicy.peekHideDelay : DockPreviewPolicy.peekDelay), execute: work)
+    }
+
+    private func showPeek(_ id: String, image: NSImage) {
+        guard id == peekedID, id == state.hoveredID, isVisible, let item = state.items.first(where: { $0.id == id }),
+              let frame = DockPreviewPolicy.peekFrame(of: item.descriptor) else { return }
+        let peek = peekPanel ?? makePeekPanel()
+        peekImage?.image = image
+        peek.setFrame(Self.cocoaRect(CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)), display: true)
+        peek.orderFrontRegardless()
+    }
+
+    private func hidePeek() {
+        peekWork?.cancel(); peekWork = nil
+        peekedID = nil
+        peekPanel?.orderOut(nil)
+        // A full-size frame costs tens of MiB, so it does not stay behind a hidden panel.
+        peekImage?.image = nil
+    }
+
+    private func makePeekPanel() -> PreviewPanel {
+        let panel = PreviewPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.title = "一瞥 · 窗口位置预览"
+        panel.isFloatingPanel = true
+        // Over ordinary windows and under the Dock preview, whose level is .popUpMenu.
+        panel.level = .statusBar
+        panel.hidesOnDeactivate = false
+        panel.hasShadow = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        panel.animationBehavior = .none
+        panel.isReleasedWhenClosed = false
+        let image = NSImageView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        image.imageScaling = .scaleAxesIndependently
+        image.autoresizingMask = [.width, .height]
+        panel.contentView = image
+        peekPanel = panel; peekImage = image
+        return panel
     }
 
     /// Keeps the panel while the pointer is on the icon, on the panel or between the two.
     private func watchPointer() {
         guard let panel, panel.isVisible, let shown else { stopWatching(); return }
         if isBlocked?() == true { hide(reason: "switcher"); return }
+        if menuTracking { outsideSince = nil; lastPointerMove = ProcessInfo.processInfo.systemUptime; return }
         let point = NSEvent.mouseLocation
+        if point != lastPointer { lastPointer = point; lastPointerMove = ProcessInfo.processInfo.systemUptime }
         if Self.keepsOpen(point: point, icon: shown.iconFrame, panel: panel.frame, edge: shown.edge) { outsideSince = nil; return }
         let now = ProcessInfo.processInfo.systemUptime
         guard let since = outsideSince else { outsideSince = now; return }
@@ -503,18 +639,34 @@ final class DockPreviewController {
         onFocus?(handle)
     }
 
-    private func close(_ handle: WindowHandle) {
-        if let error = onClose?(handle) { state.message = error; return }
-        log?("close \(handle.id)")
-        // Give the app a moment to close it (or to ask about unsaved changes), then read the list again.
+    private func close(_ handle: WindowHandle) { act(.close, on: handle) }
+
+    private func act(_ action: WindowAction, on handle: WindowHandle) {
+        if action == .hideApp || action == .quitApp {
+            // The app is what was acted on, so its preview has nothing more to show.
+            if let shown { suppress(shown) }
+            hide(reason: "app action")
+            perform?(action, handle) { error in if error != nil { NSSound.beep() } }
+            return
+        }
         let generation = self.generation
+        perform?(action, handle) { [weak self] error in
+            guard let self, self.generation == generation, self.isVisible else { return }
+            if let error { self.state.message = error; return }
+            self.log?("\(action) \(handle.id)")
+            self.refreshAfterAction(generation: generation)
+        }
+    }
+
+    /// Gives the app a moment to act (or to ask about unsaved changes), then reads the list again.
+    private func refreshAfterAction(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self, self.generation == generation, self.isVisible else { return }
             self.refreshWindows? { [weak self] in
                 guard let self, self.generation == generation, self.isVisible, let shown = self.shown else { return }
                 let fresh = self.list(for: shown)
                 if fresh.isEmpty { self.hide(reason: "last window closed"); return }
-                guard fresh.map(\.id) != self.state.items.map(\.id) else { return }
+                guard !DockPreviewPolicy.sameCards(fresh.map(\.descriptor), self.state.items.map(\.descriptor)) else { return }
                 self.fill(fresh, target: shown)
                 self.panel?.setFrame(self.position(size: self.contentSize(for: shown), target: shown), display: true)
             }
@@ -632,6 +784,14 @@ private struct DockPreviewCard: View {
         .onTapGesture { state.onOpen?(item) }
         .onHover { inside in
             if inside { state.hoveredID = item.id } else if state.hoveredID == item.id { state.hoveredID = nil }
+        }
+        .contextMenu {
+            Button("切换到窗口") { state.onOpen?(item) }
+            Button(item.descriptor.minimized ? "还原窗口" : "最小化窗口") { state.onAction?(item, .minimize) }
+            Button("关闭窗口") { state.onClose?(item) }.disabled(item.tab != nil)
+            Divider()
+            Button(item.descriptor.hidden ? "显示应用" : "隐藏应用") { state.onAction?(item, .hideApp) }
+            Button("退出 \(item.descriptor.appName)") { state.onAction?(item, .quitApp) }
         }
         .help(item.descriptor.displayTitle)
         .accessibilityElement(children: .combine)

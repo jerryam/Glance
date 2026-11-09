@@ -172,14 +172,20 @@ struct DockPreviewSettings: Codable, Equatable {
     /// Milliseconds the pointer rests on an icon before the preview opens.
     var delay = 300
     var includeMinimized = true
+    /// New pictures while the panel is open.
+    var liveThumbnails = true
+    /// Resting on a card shows that window's picture at the window's own place.
+    var peekWindow = true
     static let delayRange = 0...1000
     init() {}
-    private enum CodingKeys: String, CodingKey { case enabled, delay, includeMinimized }
+    private enum CodingKeys: String, CodingKey { case enabled, delay, includeMinimized, liveThumbnails, peekWindow }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         delay = try c.decodeIfPresent(Int.self, forKey: .delay) ?? 300
         includeMinimized = try c.decodeIfPresent(Bool.self, forKey: .includeMinimized) ?? true
+        liveThumbnails = try c.decodeIfPresent(Bool.self, forKey: .liveThumbnails) ?? true
+        peekWindow = try c.decodeIfPresent(Bool.self, forKey: .peekWindow) ?? true
     }
 }
 

@@ -566,8 +566,10 @@ struct SettingsView: View {
                         ForEach([0, 150, 300, 500, 800], id: \.self) { Text($0 == 0 ? "立即" : "\($0) 毫秒").tag($0) }
                     }
                     SettingsToggle("包含最小化的窗口", isOn: $model.draft.dockPreview.includeMinimized)
+                    SettingsToggle("实时更新预览图", isOn: $model.draft.dockPreview.liveThumbnails)
+                    SettingsToggle("悬停时在窗口原来的位置显示它", isOn: $model.draft.dockPreview.peekWindow)
                 }
-                SettingsNote("像 Windows 任务栏一样：点按预览切换到那个窗口，悬停时点 × 关闭它；在 Dock 上左右移动可直接换到其他应用。需要辅助功能权限，预览图需要屏幕录制权限。")
+                SettingsNote("像 Windows 任务栏一样：点按预览切换到那个窗口，点 × 或按鼠标中键关闭它，右键可以最小化、隐藏或退出；在 Dock 上左右移动可直接换到其他应用。悬停时显示的是窗口的画面，不会移动真实窗口。需要辅助功能权限，预览图需要屏幕录制权限。")
             }
             SettingsGroup("鼠标") {
                 SettingsToggle("鼠标悬停时改变选中窗口", isOn: $model.draft.mouseHoverEnabled)

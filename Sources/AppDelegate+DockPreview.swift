@@ -18,7 +18,7 @@ extension AppDelegate {
         dockPreview.storeImage = { [weak self] id, image in self?.state.storePreview(id, image: image) }
         dockPreview.isBlocked = { [weak self] in self?.showing ?? false }
         dockPreview.onFocus = { [weak self] handle in self?.focusFromDock(handle) }
-        dockPreview.onClose = { handle in WindowControl.perform(.close, on: handle) }
+        dockPreview.perform = { action, handle, done in WindowControl.performInBackground(action, on: handle, completion: done) }
         if let path = Self.argument(after: "--dock-preview-log") {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             try? Data().write(to: url)
@@ -27,12 +27,15 @@ extension AppDelegate {
     }
 
     func focusFromDock(_ handle: WindowHandle) {
-        if let error = WindowControl.perform(.focus, on: handle) {
-            NSSound.beep()
-            dockPreview.log?("focus failed: \(error)")
-            return
+        WindowControl.performInBackground(.focus, on: handle) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                NSSound.beep()
+                self.dockPreview.log?("focus failed: \(error)")
+                return
+            }
+            self.engine.markFocused(handle)
         }
-        engine.markFocused(handle)
     }
 
     static func argument(after flag: String) -> String? {

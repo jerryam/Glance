@@ -277,7 +277,62 @@ struct CoreTests {
         verifyRecentOrder()
         verifyBrowserScripts()
         verifySearchHabits()
+        verifyDockPreviewExtras()
         print("\(passed) checks passed")
+    }
+    static func verifyDockPreviewExtras() {
+        func window(_ id: String, minimized: Bool = false, hidden: Bool = false, here: Bool = true, frame: WindowRect? = WindowRect(x: 10, y: 20, width: 800, height: 600)) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: 7, pid: 1, appName: "应用", bundleID: "a", title: id, minimized: minimized, hidden: hidden, onCurrentSpace: here, displayID: 1, aspectRatio: 1.5)
+            d.frame = frame
+            return d
+        }
+        // Settings.
+        check(DockPreviewSettings().liveThumbnails && DockPreviewSettings().peekWindow, "实时更新和窗口位置预览默认开启")
+        let old = try! JSONDecoder().decode(DockPreviewSettings.self, from: Data(#"{"enabled":false,"delay":150,"includeMinimized":false}"#.utf8))
+        check(!old.enabled && old.delay == 150 && !old.includeMinimized && old.liveThumbnails && old.peekWindow, "旧设置没有新字段时保留原值，新开关采用默认值")
+        var off = DockPreviewSettings(); off.liveThumbnails = false; off.peekWindow = false
+        let back = try! JSONDecoder().decode(DockPreviewSettings.self, from: JSONEncoder().encode(off))
+        check(back == off, "关掉的开关保存后仍然是关的")
+
+        // Live pictures.
+        let p = DockPreviewPolicy.self
+        let cards = [window("a"), window("b"), window("c")]
+        check(p.dueForRefresh(cards, hovered: nil, capturedAt: ["a": 100, "b": 100, "c": 100], now: 101).isEmpty, "刚读过的预览图不会马上再读")
+        check(p.dueForRefresh(cards, hovered: "b", capturedAt: ["a": 100, "b": 100, "c": 100], now: 101) == ["b"], "指针下的窗口每秒更新，其他窗口要等更久")
+        check(p.dueForRefresh(cards, hovered: nil, capturedAt: ["a": 100, "b": 99, "c": 97], now: 103) == ["c", "b", "a"], "等得最久的窗口先更新")
+        check(p.dueForRefresh(cards, hovered: "a", capturedAt: ["a": 90, "b": 80, "c": 70], now: 100).first == "a", "指针下的窗口排在等得更久的窗口之前")
+        check(p.dueForRefresh(cards, hovered: nil, capturedAt: [:], now: 100).count == 3, "没读过的窗口也会更新")
+        let many = (0..<12).map { window("w\($0)") }
+        check(p.dueForRefresh(many, hovered: nil, capturedAt: [:], now: 100).count == p.perTick, "窗口再多，每次也只读有限的几个")
+        let quiet = [window("mini", minimized: true), window("hid", hidden: true), window("away", here: false)]
+        check(p.dueForRefresh(quiet, hovered: "mini", capturedAt: [:], now: 100).isEmpty, "最小化、隐藏和其他桌面的窗口保留原来的画面")
+        var noID = WindowDescriptor(id: "x", windowID: nil, pid: 1, appName: "应用", bundleID: "a", title: "x", minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        check(p.dueForRefresh([noID], hovered: "x", capturedAt: [:], now: 100).isEmpty, "没有窗口编号的条目无法更新")
+
+        // The window at its own place.
+        check(p.peekFrame(of: window("a")) == WindowRect(x: 10, y: 20, width: 800, height: 600), "画面显示在窗口原来的位置")
+        check(p.peekFrame(of: window("a", minimized: true)) == nil, "最小化的窗口不显示")
+        check(p.peekFrame(of: window("a", hidden: true)) == nil, "隐藏的窗口不显示")
+        check(p.peekFrame(of: window("a", here: false)) == nil, "其他桌面的窗口不显示")
+        check(p.peekFrame(of: window("a", frame: nil)) == nil, "不知道位置的窗口不显示")
+        check(p.peekFrame(of: window("a", frame: WindowRect(x: 0, y: 0, width: 20, height: 20))) == nil, "太小的窗口不显示")
+        noID.frame = WindowRect(x: 0, y: 0, width: 400, height: 400)
+        check(p.peekFrame(of: noID) == nil, "没有窗口编号的条目读不到画面，不显示")
+
+        // Middle click.
+        check(p.middleClickTarget(down: "a", up: "a") == "a", "在同一张卡片上按下和松开算一次中键点按")
+        check(p.middleClickTarget(down: "a", up: "b") == nil, "按下和松开不在同一张卡片上不关闭")
+        check(p.middleClickTarget(down: nil, up: "a") == nil, "按下时不在卡片上不关闭")
+        check(p.middleClickTarget(down: "a", up: nil) == nil, "松开时不在卡片上不关闭")
+
+        // A window that changes state stays in the list.
+        check(p.sameCards([window("a")], [window("a")]), "没有变化时不重新排版")
+        check(!p.sameCards([window("a")], [window("a", minimized: true)]), "窗口最小化后卡片要更新")
+        check(!p.sameCards([window("a")], [window("a", hidden: true)]), "应用隐藏后卡片要更新")
+        check(!p.sameCards([window("a"), window("b")], [window("a")]), "窗口关闭后卡片要更新")
+
+        // Findable in settings.
+        check(SettingSearchIndex.results("实时更新预览图").first?.section == 3 && SettingSearchIndex.results("悬停时在窗口原来的位置显示它").first?.section == 3, "新开关可以在设置搜索里找到")
     }
     static func verifySearchHabits() {
         let day = 86_400.0, start = 1_000_000.0, a = "app:a", b = "app:b"

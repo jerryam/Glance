@@ -375,6 +375,45 @@ enum SettingsReturnPolicy {
 
 /// 一瞥 leaves its own process out of the window list. Its settings window joins the switcher through this
 /// entry, so it can be reached again after switching away from it.
+/// The decisions behind the Dock preview's live pictures, its right-click actions and showing a window in place.
+enum DockPreviewPolicy {
+    static let liveTick: TimeInterval = 1
+    static let hoveredInterval: TimeInterval = 1
+    static let otherInterval: TimeInterval = 3
+    /// Pictures asked for per tick, so an app with many windows costs no more than one with a few.
+    static let perTick = 4
+    /// The pointer has not moved for this long: nobody is looking, so no more captures until it does.
+    static let liveIdleLimit: TimeInterval = 60
+    static let peekDelay: TimeInterval = 0.3
+    static let peekHideDelay: TimeInterval = 0.15
+
+    /// Which cards get a new picture now: the one under the pointer first, then whichever has waited longest.
+    /// A window that is minimized, hidden or on another desktop keeps its last picture.
+    static func dueForRefresh(_ windows: [WindowDescriptor], hovered: String?, capturedAt: [String: TimeInterval], now: TimeInterval) -> [String] {
+        let live = windows.filter { !$0.minimized && !$0.hidden && $0.onCurrentSpace && !$0.windowless && $0.windowID != nil }
+        func waited(_ id: String) -> TimeInterval { capturedAt[id].map { now - $0 } ?? .infinity }
+        let first = live.filter { $0.id == hovered && waited($0.id) >= hoveredInterval - 0.05 }.map(\.id)
+        let others = live.filter { $0.id != hovered && waited($0.id) >= otherInterval - 0.05 }
+            .sorted { waited($0.id) > waited($1.id) }.map(\.id)
+        return Array((first + others).prefix(perTick))
+    }
+
+    /// Where a window's picture goes, or nil when the window is not on this desktop to be shown in place.
+    static func peekFrame(of window: WindowDescriptor) -> WindowRect? {
+        guard !window.minimized, !window.hidden, window.onCurrentSpace, !window.windowless, window.windowID != nil,
+              let frame = window.frame, frame.width >= 40, frame.height >= 40 else { return nil }
+        return frame
+    }
+
+    /// Pressed on one card and let go on another is not a click on either.
+    static func middleClickTarget(down: String?, up: String?) -> String? { down == up ? up : nil }
+
+    /// Whether the cards still show the same thing: a window can stay in the list and only change state.
+    static func sameCards(_ a: [WindowDescriptor], _ b: [WindowDescriptor]) -> Bool {
+        a.map { "\($0.id)|\($0.minimized)|\($0.hidden)" } == b.map { "\($0.id)|\($0.minimized)|\($0.hidden)" }
+    }
+}
+
 enum SettingsWindowEntry {
     static let id = "glance:settings"
     /// The panel orders a visible settings window out while it is open, which is why "set aside" counts as open.
@@ -703,6 +742,7 @@ enum SettingSearchIndex {
         .init(3, "Dock 预览", "任务栏 缩略图 taskbar 悬停 预览 Windows"),
         .init(3, "指针停在 Dock 图标上时显示窗口预览", "任务栏 缩略图 taskbar hover dock preview"),
         .init(3, "显示前等待", "延迟 delay Dock 预览"), .init(3, "包含最小化的窗口", "Dock 预览 最小化"),
+        .init(3, "实时更新预览图", "Dock 预览 缩略图 实时 live"), .init(3, "悬停时在窗口原来的位置显示它", "Dock 预览 悬停 真实窗口 peek"),
         .init(3, "鼠标悬停时改变选中窗口", "hover"), .init(3, "切换后移动鼠标", "光标 跨屏"),
         .init(3, "触控板手势", "三指 四指 gesture trackpad 冲突 调度中心"),
         .init(3, "尝试拦截已识别的手势（实验性）", "手势 冲突 Mission Control 调度中心"),
