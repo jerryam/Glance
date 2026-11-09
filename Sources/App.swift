@@ -55,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var cachedPickID: String?
     var settingsSetAside = false
     var settingsWasKey = false
+    /// When the settings window last gained the keyboard: its place in the recent order, as for any other window.
+    var settingsLastFocused: TimeInterval = 0
     var supportObservers: [NSObjectProtocol] = []
     var previousModifiers: ShortcutModifiers = []
     var modifierRepeat: Timer?
@@ -616,6 +618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .dark: panel.appearance = NSAppearance(named: .darkAqua)
         }
         state.expandedApp = nil; state.extraItems = []; state.zoomImage = nil; state.dropTargetID = nil
+        state.ownItems = settingsEntry()
         state.pinnedIDs = pinnedIDs
         state.searchVisible = startSearching
         state.all = engine.cachedSnapshot(); state.query = ""; state.setMessage("")
@@ -932,6 +935,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if !launcher.open(id) { NSSound.beep() }
             return
         }
+        if selected.descriptor.settingsWindow {
+            dismiss()
+            bringSettingsForward()
+            moveCursorIfAsked(to: selected)
+            return
+        }
         if !AXIsProcessTrusted() && selected.browserTab == nil { state.setMessage("请先开启辅助功能权限。", error: true); state.sticky = true; relayout(); return }
         if selected.browserTab != nil { focusBrowserTab(selected); return }
         // The app may not be answering, and the keyboard and panel should not wait with it. The panel stays until
@@ -950,11 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             engine.markFocused(selected)
             guard open else { return }
             dismiss()
-            let mode = state.settings.advanced.followCursor
-            if mode != .never, let rect = selected.descriptor.frame, rect.width > 0,
-               mode == .always || selected.descriptor.displayID.map({ !CGDisplayBounds($0).contains(state.cursor ?? .zero) }) == true {
-                CGWarpMouseCursorPosition(CGPoint(x: rect.x + rect.width / 2, y: rect.y + rect.height / 2))
-            }
+            moveCursorIfAsked(to: selected)
             if let nextTrigger { trigger(index: nextTrigger.index, reverse: nextTrigger.reverse) }
             return
         }
@@ -971,11 +976,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             orderPanelFront()
         }
     }
-    /// A settings window hidden for the panel is otherwise lost: 一瞥 does not list its own windows.
+    /// 设置 › 鼠标与触控板 › 切换后移动鼠标.
+    private func moveCursorIfAsked(to selected: WindowHandle) {
+        let mode = state.settings.advanced.followCursor
+        if mode != .never, let rect = selected.descriptor.frame, rect.width > 0,
+           mode == .always || selected.descriptor.displayID.map({ !CGDisplayBounds($0).contains(state.cursor ?? .zero) }) == true {
+            CGWarpMouseCursorPosition(CGPoint(x: rect.x + rect.width / 2, y: rect.y + rect.height / 2))
+        }
+    }
+    /// The settings window steps aside while the panel is open, and comes back when it closes.
     func setSettingsAside() {
         guard let window = settingsWindow, window.isVisible else { return }
         settingsSetAside = true; settingsWasKey = window.isKeyWindow
         window.orderOut(nil)
+    }
+    /// The settings window's place in the list, while it is open. Read after it has stepped aside.
+    func settingsEntry() -> [WindowHandle] {
+        guard let window = settingsWindow,
+              SettingsWindowEntry.isOpen(visible: window.isVisible, minimized: window.isMiniaturized, setAside: settingsSetAside) else { return [] }
+        let frame = window.frame
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? frame.maxY
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        let screen = NSScreen.screens.first { $0.frame.contains(center) } ?? window.screen
+        let descriptor = SettingsWindowEntry.descriptor(pid: ProcessInfo.processInfo.processIdentifier, bundleID: Bundle.main.bundleIdentifier ?? "",
+            frame: WindowRect(x: Double(frame.minX), y: Double(primaryHeight - frame.maxY), width: Double(frame.width), height: Double(frame.height)),
+            displayID: (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+            minimized: window.isMiniaturized, isKey: settingsSetAside && settingsWasKey,
+            lastFocused: settingsLastFocused, now: Date.timeIntervalSinceReferenceDate)
+        return [WindowHandle(descriptor: descriptor, ax: nil, icon: NSApp.applicationIconImage)]
+    }
+    /// Chosen from the list: to the front, whichever state it was left in.
+    func bringSettingsForward() {
+        guard let window = settingsWindow else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func returnSettings(cancelled: Bool) {
         guard settingsSetAside, let window = settingsWindow else { return }
@@ -997,7 +1031,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             })
         } else { panel.orderOut(nil) }
         previewPanel?.orderOut(nil); capture.cancel(); engine.suspendTracking = false
-        state.zoomImage = nil; state.extraItems = []; state.expandedApp = nil; state.dropTargetID = nil
+        state.zoomImage = nil; state.extraItems = []; state.ownItems = []; state.expandedApp = nil; state.dropTargetID = nil
         returnSettings(cancelled: cancelled)
         updateHotkeyGate()
         syncActivityTimers()
@@ -1007,6 +1041,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // A menu bar result can belong to a system process; it only opens its menu.
         guard !selected.descriptor.menuBarItem else { state.setMessage("菜单栏图标只能打开它的菜单，按 ↩ 即可。"); relayout(); return }
         guard selected.descriptor.launcher == nil else { state.setMessage("按 ↩ 打开它。"); relayout(); return }
+        // Its process is 一瞥 itself, so "quit the app" here would quit the switcher.
+        guard !selected.descriptor.settingsWindow else { state.setMessage("按 ↩ 回到设置窗口，再在那里操作。"); relayout(); return }
         guard !state.loading else { state.setMessage("正在更新窗口，请稍候再操作。"); relayout(); return }
         state.sticky = true
         pendingCommit = false; pendingFocusID = nil
@@ -1110,6 +1146,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applySettings(); settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func windowWillClose(_ notification: Notification) { recording = false; updateHotkeyGate() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        if (notification.object as? NSWindow) === settingsWindow { settingsLastFocused = Date.timeIntervalSinceReferenceDate }
+    }
     func windowShouldClose(_ sender: NSWindow) -> Bool { sender !== settingsWindow || resolveUnsavedSettings() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         resolveUnsavedSettings() ? .terminateNow : .terminateCancel
@@ -1151,7 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         screen = NSScreen.main; state.profile = ShortcutProfile.defaults()[2]; state.settings = settings.value
         state.style = settings.value.style; state.frontPID = nil; state.displayID = nil; state.loading = false
         state.searchVisible = false
-        state.expandedApp = nil; state.extraItems = []; state.zoomImage = nil; state.pinnedIDs = []; state.badges = [:]
+        state.expandedApp = nil; state.extraItems = []; state.ownItems = []; state.zoomImage = nil; state.pinnedIDs = []; state.badges = [:]
         state.query = ""; state.setMessage(""); state.sticky = true; state.isDemo = true; state.actionPending = false; focusInFlight = false
         pendingCommit = false; pendingFocusID = nil; state.setVisiblePreviews([]); showGeneration += 1
         let examples = [("Safari浏览器", "设计参考与工作资料", "/Applications/Safari.app"), ("访达", "项目文件", "/System/Library/CoreServices/Finder.app"),

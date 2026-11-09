@@ -453,6 +453,8 @@ struct WindowDescriptor: Identifiable, Equatable {
     var launcher: LaunchKind? = nil
     /// Not a window: a browser tab, a menu bar icon or something to open, which only join a search.
     var searchOnly: Bool { browserTab || menuBarItem || launcher != nil }
+    /// 一瞥's own settings window: listed like a window, but the only thing to do with it is go to it.
+    var settingsWindow = false
     /// Secondary text, such as a tab's web address.
     var subtitle: String? = nil
     var pinned = false

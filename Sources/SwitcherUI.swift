@@ -37,6 +37,8 @@ final class SwitcherState: ObservableObject {
     var all: [WindowHandle] = []
     /// Browser tabs found for this search session; kept apart so window refreshes do not drop them.
     var extraItems: [WindowHandle] = []
+    /// 一瞥's own settings window while it is open; window refreshes replace `all`, which never includes it.
+    var ownItems: [WindowHandle] = []
     var pinnedIDs = Set<String>()
     /// When grouping by app, the app whose windows are currently expanded.
     var expandedApp: Int32?
@@ -97,7 +99,7 @@ final class SwitcherState: ObservableObject {
     }
     func refilter(reset: Bool) {
         let start = ProcessInfo.processInfo.systemUptime
-        let source = all + extraItems
+        let source = all + ownItems + extraItems
         let pinned = pinnedIDs
         let descriptors = WindowSearch.filtered(source.map { handle in
                 var descriptor = handle.descriptor; descriptor.pinned = pinned.contains(descriptor.id); return descriptor
@@ -360,10 +362,10 @@ private struct WindowActionsMenu: View {
             if includeSwitch {
                 Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launcher != nil ? "打开" : "切换到窗口")) { state.selectWindow(item.id, commit: true) }
             }
-            if !item.descriptor.searchOnly {
+            if !item.descriptor.searchOnly && !item.descriptor.settingsWindow {
                 Button(item.descriptor.pinned ? "取消置顶" : "置顶这个窗口") { state.onTogglePin?(item.id) }
             }
-            if !item.descriptor.windowless && !item.descriptor.searchOnly {
+            if !item.descriptor.windowless && !item.descriptor.searchOnly && !item.descriptor.settingsWindow {
                 Button(item.descriptor.minimized ? "还原窗口" : "最小化窗口") { state.actOnWindow(item.id, action: .minimize) }
                 Button(item.descriptor.fullscreen ? "退出全屏" : "进入全屏") { state.actOnWindow(item.id, action: .fullscreen) }
                 Button("关闭窗口") { state.actOnWindow(item.id, action: .close) }.disabled(item.tab != nil)
@@ -375,8 +377,9 @@ private struct WindowActionsMenu: View {
                 }
                 Divider()
             }
-            // A menu bar result may belong to a system process; app actions stay with real windows.
-            if !item.descriptor.menuBarItem && item.descriptor.launcher == nil {
+            // A menu bar result may belong to a system process, and the settings window's app is 一瞥 itself;
+            // app actions stay with other apps' real windows.
+            if !item.descriptor.menuBarItem && item.descriptor.launcher == nil && !item.descriptor.settingsWindow {
                 Button(item.descriptor.hidden ? "显示应用" : "隐藏应用") { state.actOnWindow(item.id, action: .hideApp) }
                 Button("退出 \(item.descriptor.appName)") { state.actOnWindow(item.id, action: .quitApp) }
             }
@@ -548,6 +551,7 @@ private struct PreviewImage: View {
         if item.descriptor.browserTab { return item.descriptor.subtitle ?? "浏览器标签页" }
         if item.descriptor.menuBarItem { return "按 ↩ 打开它的菜单" }
         if let kind = item.descriptor.launcher { return kind == .app ? "按 ↩ 打开这个应用" : "按 ↩ 打开这个设置页" }
+        if item.descriptor.settingsWindow { return "一瞥的设置窗口" }
         if item.descriptor.windowless { return "没有打开的窗口" }
         if item.descriptor.minimized { return "窗口已最小化" }
         return "暂时没有预览"
@@ -587,7 +591,7 @@ private struct ThumbnailCard: View {
             .modifier(WindowAccessibility(state: state, item: item))
             .help(item.descriptor.displayTitle)
             .overlay(alignment: .bottomTrailing) {
-                if state.settings.advanced.tileButtons && !item.descriptor.windowless && !item.descriptor.searchOnly && state.hoveredID == item.id {
+                if state.settings.advanced.tileButtons && !item.descriptor.windowless && !item.descriptor.searchOnly && !item.descriptor.settingsWindow && state.hoveredID == item.id {
                     TileButtons(state: state, item: item).padding(16)
                 }
             }
@@ -755,12 +759,12 @@ private struct BrowseToolbar: View {
                     Button { state.onAction?(.close) } label: { Image(systemName: "xmark") }
                         .help("关闭窗口（⌘W）").accessibilityLabel("关闭选中窗口")
                 }.buttonStyle(PanelIconButtonStyle())
-                    .disabled(!controlsAvailable || state.selected?.descriptor.windowless == true || state.selected?.descriptor.searchOnly == true)
+                    .disabled(!controlsAvailable || state.selected?.descriptor.windowless == true || state.selected?.descriptor.searchOnly == true || state.selected?.descriptor.settingsWindow == true)
                 if let selected = state.selected {
                     Menu { WindowActionsMenu(state: state, item: selected) } label: { Image(systemName: "ellipsis").font(.system(size: 13, weight: .medium)) }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).tint(Color.secondary).fixedSize().frame(width: 30, height: 28)
                         .help("更多操作").accessibilityLabel("选中窗口的更多操作")
-                        .disabled(!controlsAvailable)
+                        .disabled(!controlsAvailable || selected.descriptor.settingsWindow)
                 }
             }.padding(2).background(.quinary, in: Capsule(style: .continuous))
             HStack(spacing: 0) {
@@ -1024,8 +1028,8 @@ private struct SearchDetail: View {
                     Text(meta(item.descriptor)).font(.system(size: 12)).foregroundStyle(GlanceDesign.secondary).lineLimit(1)
                 }
                 HStack(spacing: 8) {
-                    // Apps to open and menu bar icons are not windows: they only have the one action.
-                    let opensSomething = item.descriptor.launcher != nil || item.descriptor.menuBarItem
+                    // Apps to open, menu bar icons and the settings window only have the one action.
+                    let opensSomething = item.descriptor.launcher != nil || item.descriptor.menuBarItem || item.descriptor.settingsWindow
                     if !opensSomething {
                         let windowActions = controlsAvailable && !item.descriptor.windowless && !item.descriptor.searchOnly
                         Button("最小化 ⌘M") { state.onAction?(.minimize) }.buttonStyle(GlanceButtonStyle(compact: true)).disabled(!windowActions)

@@ -60,7 +60,7 @@ extension AppDelegate {
         if let data = try? JSONEncoder().encode(pins) { UserDefaults.standard.set(data, forKey: Self.pinsKey) }
     }
     func togglePin(_ id: String) {
-        guard showing, !state.isDemo, let item = state.items.first(where: { $0.id == id }), !item.descriptor.searchOnly else { return }
+        guard showing, !state.isDemo, let item = state.items.first(where: { $0.id == id }), !item.descriptor.searchOnly, !item.descriptor.settingsWindow else { return }
         let wasPinned = pinnedIDs.contains(id)
         pins = wasPinned ? pins.filter { $0.id != id } : PinPolicy.adding(WindowPin(item.descriptor), to: pins)
         pinnedIDs = PinPolicy.boundIDs(pins)
@@ -95,7 +95,7 @@ extension AppDelegate {
     func openDroppedFiles(_ urls: [URL], on id: String) {
         guard showing, !state.isDemo, !urls.isEmpty, let index = state.items.firstIndex(where: { $0.id == id }) else { return }
         let item = state.items[index]
-        guard !item.descriptor.menuBarItem, item.descriptor.launcher == nil else { return }
+        guard !item.descriptor.menuBarItem, item.descriptor.launcher == nil, !item.descriptor.settingsWindow else { return }
         guard let appURL = NSRunningApplication(processIdentifier: item.descriptor.pid)?.bundleURL else {
             state.setMessage("找不到这个应用，无法打开拖入的文件。", error: true); return
         }

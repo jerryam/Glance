@@ -373,6 +373,30 @@ enum SettingsReturnPolicy {
     static func comesToFront(wasKey: Bool, cancelled: Bool, demo: Bool) -> Bool { wasKey && (cancelled || demo) }
 }
 
+/// 一瞥 leaves its own process out of the window list. Its settings window joins the switcher through this
+/// entry, so it can be reached again after switching away from it.
+enum SettingsWindowEntry {
+    static let id = "glance:settings"
+    /// The panel orders a visible settings window out while it is open, which is why "set aside" counts as open.
+    static func isOpen(visible: Bool, minimized: Bool, setAside: Bool) -> Bool { visible || minimized || setAside }
+    /// `lastFocused` is when the window last gained the keyboard. While it has the keyboard it is the current
+    /// window, so it sorts first and a quick ⌥Tab goes to the window used before it.
+    static func descriptor(pid: Int32, bundleID: String, frame: WindowRect, displayID: UInt32?, minimized: Bool,
+                           isKey: Bool, lastFocused: Double, now: Double) -> WindowDescriptor {
+        // No window number, so nothing tries to capture it. A window that was set aside comes back on the current desktop.
+        var entry = WindowDescriptor(id: id, windowID: nil, pid: pid, appName: "一瞥", bundleID: bundleID, title: "设置", minimized: minimized, hidden: false,
+                                     onCurrentSpace: true, displayID: displayID, aspectRatio: frame.width / max(1, frame.height))
+        entry.settingsWindow = true
+        entry.frame = frame
+        entry.lastFocused = isKey ? now : lastFocused
+        entry.created = entry.lastFocused
+        entry.zOrder = isKey ? -1 : Int.max
+        // Lets "glance" and "settings" find it; a subtitle is only shown for tabs and menu bar icons.
+        entry.subtitle = "Glance Settings"
+        return entry
+    }
+}
+
 enum WindowListChange {
     /// Whether a fresh read changes anything the panel shows. Every read stamps the front window with the
     /// current time, so focus times count only through the order they put the windows in.

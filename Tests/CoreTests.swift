@@ -272,7 +272,55 @@ struct CoreTests {
         verifyOptimizations()
         verifyThreading()
         verifyWindowShortcuts()
+        verifySettingsEntry()
         print("\(passed) checks passed")
+    }
+    static func verifySettingsEntry() {
+        check(SettingsWindowEntry.isOpen(visible: true, minimized: false, setAside: false), "显示着的设置窗口进入列表")
+        check(SettingsWindowEntry.isOpen(visible: false, minimized: true, setAside: false), "最小化的设置窗口进入列表")
+        check(SettingsWindowEntry.isOpen(visible: false, minimized: false, setAside: true), "面板打开时暂时让开的设置窗口进入列表")
+        check(!SettingsWindowEntry.isOpen(visible: false, minimized: false, setAside: false), "关闭的设置窗口不进入列表")
+        let frame = WindowRect(x: 100, y: 50, width: 980, height: 740)
+        func entry(minimized: Bool = false, isKey: Bool = false, lastFocused: Double = 250) -> WindowDescriptor {
+            SettingsWindowEntry.descriptor(pid: 99, bundleID: "com.jethro.windowhop", frame: frame, displayID: 1, minimized: minimized,
+                                           isKey: isKey, lastFocused: lastFocused, now: 500)
+        }
+        func window(_ id: String, pid: Int32, lastFocused: Double) -> WindowDescriptor {
+            var descriptor = WindowDescriptor(id: id, windowID: UInt32(pid), pid: pid, appName: "应用\(id)", bundleID: "app.\(id)", title: id, minimized: false, hidden: false,
+                                              onCurrentSpace: true, displayID: 1, aspectRatio: 1.6)
+            descriptor.lastFocused = lastFocused
+            return descriptor
+        }
+        let plain = entry(), id = SettingsWindowEntry.id
+        check(plain.settingsWindow && !plain.searchOnly && !plain.windowless && plain.frame == frame, "列表里的普通一项，不搜索也能看到")
+        check(plain.windowID == nil, "没有窗口编号，预览和窗口操作都不会碰它")
+        check(plain.lastFocused == 250 && entry(isKey: true).lastFocused == 500, "有键盘时算当前窗口，否则按上次使用的时间")
+        let a = window("a", pid: 10, lastFocused: 300), b = window("b", pid: 20, lastFocused: 200)
+        var settings = UserSettings.defaults
+        var profile = settings.shortcuts[0]
+        func ids(_ windows: [WindowDescriptor], front: Int32? = 10, display: UInt32? = 1, query: String = "") -> [String] {
+            WindowSearch.filtered(windows, settings: settings, profile: profile, frontPID: front, displayID: display, query: query).map(\.id)
+        }
+        check(ids([a, b, plain]) == ["a", id, "b"], "按最近使用的时间排在其他窗口之间")
+        check(ids([a, b, entry(isKey: true)], front: 99) == [id, "a", "b"], "设置窗口在前台时排第一，⌥Tab 回到最近的其他窗口")
+        profile.scope = .currentApp
+        check(ids([a, plain], front: 10) == ["a"] && ids([a, plain], front: 99) == [id], "“当前应用”只在一瞥自己在前台时列出它")
+        profile.scope = .otherApps
+        check(ids([a, plain], front: 99) == ["a"] && ids([a, plain], front: 10) == [id], "“其他应用”遵守同样的规则")
+        profile.scope = .all
+        profile.currentScreenOnly = true
+        check(ids([a, plain], display: 1) == ["a", id] && ids([a, plain], display: 2).isEmpty, "“只显示当前屏幕”也对它生效")
+        profile.currentScreenOnly = false
+        settings.showMinimized = false
+        check(ids([a, entry(minimized: true)]) == ["a"] && ids([a, plain]) == ["a", id], "不显示最小化窗口时，最小化的设置窗口也不显示")
+        settings.showMinimized = true
+        for query in ["设置", "shezhi", "glance", "settings"] {
+            check(WindowSearch.matches(plain, query: query), "搜索“\(query)”能找到设置窗口")
+        }
+        var page = WindowDescriptor(id: "launch:setting:page", windowID: nil, pid: 0, appName: "设置", bundleID: "page", title: "设置", minimized: false, hidden: false,
+                                    onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        page.launcher = .setting
+        check(ids([page, plain], query: "设置").first == id, "搜索时已经打开的设置窗口排在同名的可打开项之前")
     }
     static func verifyWindowShortcuts() {
         // The second screen is offset, and its size does not divide evenly.
