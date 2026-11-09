@@ -414,6 +414,32 @@ enum DockPreviewPolicy {
     }
 }
 
+/// 设置 › 通用 › 意外退出后自动重新打开: what runs after a crash, and when to stop trying.
+enum CrashRestartPolicy {
+    /// Tells the new copy why it was opened.
+    static let argument = "--restarted-after-crash"
+    static let window: TimeInterval = 600
+    /// This many reopenings within the window, and the next crash stays closed: reopening is not helping.
+    static let limit = 3
+    /// The wait lets the crashed copy finish dying, so the new one does not hand over to it and quit.
+    static func script(delay: Int = 2, opener: String = "/usr/bin/open") -> String {
+        "sleep \(delay); exec \(opener) -n \"$0\" --args \(argument)"
+    }
+    /// The app's path is an argument, never part of the script, so no character in it can change what runs.
+    static func command(appPath: String) -> [String] { ["/bin/sh", "-c", script(), appPath] }
+    static func recent(_ history: [Double], now: Double) -> [Double] {
+        // A clock set back must not keep old entries alive.
+        history.filter { $0 <= now && now - $0 < window }
+    }
+    static func recording(restartAt now: Double, history: [Double]) -> [Double] { recent(history, now: now) + [now] }
+    static func allowsAnother(_ history: [Double], now: Double) -> Bool { recent(history, now: now).count < limit }
+    /// A copy started for a test or from the command line, or not from an app bundle, is not reopened.
+    static func applies(arguments: [String], bundlePath: String) -> Bool {
+        let ordinary = [argument, "--settings", "--restart"]
+        return bundlePath.hasSuffix(".app") && arguments.dropFirst().allSatisfy { !$0.hasPrefix("--") || ordinary.contains($0) }
+    }
+}
+
 enum SettingsWindowEntry {
     static let id = "glance:settings"
     /// The panel orders a visible settings window out while it is open, which is why "set aside" counts as open.
@@ -754,6 +780,7 @@ enum SettingSearchIndex {
         .init(6, "切换窗口的方式", "窗口服务 辅助功能 聚焦 焦点 focus skylight"),
         .init(6, "VoiceOver 开启时保持面板打开", "旁白 屏幕朗读 辅助功能"),
         .init(6, "显示菜单栏图标"), .init(6, "菜单栏图标", "彩色 实心 线条"), .init(6, "登录时自动启动", "开机 login startup"),
+        .init(6, "意外退出后自动重新打开", "崩溃 闪退 重启 crash restart relaunch"),
         .init(6, "允许命令行列出和切换窗口", "命令行 终端 CLI terminal list 安全"),
         .init(6, "备份与迁移", "导出 导入 备份 恢复 迁移 默认 export import backup reset"),
         .init(7, "管理菜单栏图标", "隐藏 收起 图标 状态栏 Ice Bartender menu bar 刘海"),

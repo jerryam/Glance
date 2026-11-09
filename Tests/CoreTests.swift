@@ -279,7 +279,55 @@ struct CoreTests {
         verifySearchHabits()
         verifyDockPreviewExtras()
         verifyChineseSearch()
+        verifyCrashRestart()
         print("\(passed) checks passed")
+    }
+    static func verifyCrashRestart() {
+        let p = CrashRestartPolicy.self
+        // The command, run by a real shell with a harmless program in place of `open`.
+        func run(_ arguments: [String]) -> String {
+            let process = Process(), pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: arguments[0])
+            process.arguments = Array(arguments.dropFirst())
+            process.standardOutput = pipe
+            try! process.run()
+            process.waitUntilExit()
+            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        }
+        for path in ["/Applications/Glance.app", "/tmp/带 空格 的/Glance.app", "/tmp/it's \"odd\" $(touch x); `y`.app"] {
+            let output = run(["/bin/sh", "-c", p.script(delay: 0, opener: "/usr/bin/printf '%s|'"), path])
+            check(output == "-n|\(path)|--args|--restarted-after-crash|", "重新打开的命令原样传递路径：\(path)")
+            let command = p.command(appPath: path)
+            check(command.count == 4 && command[0] == "/bin/sh" && command[1] == "-c" && command[3] == path && !command[2].contains(path), "路径只作为参数，不进入脚本")
+        }
+        check(p.script().hasPrefix("sleep 2;") && p.script().contains("exec /usr/bin/open -n"), "等旧进程退出后再打开一个新进程")
+
+        // Stopping after repeated crashes.
+        check(p.allowsAnother([], now: 1000), "没有崩溃记录时可以重新打开")
+        let twice = p.recording(restartAt: 1100, history: p.recording(restartAt: 1000, history: []))
+        check(twice == [1000, 1100] && p.allowsAnother(twice, now: 1100), "重新打开两次后还可以再开一次")
+        let thrice = p.recording(restartAt: 1200, history: twice)
+        check(thrice.count == 3 && !p.allowsAnother(thrice, now: 1200), "重新打开三次后不再重开")
+        check(p.allowsAnother(thrice, now: 1000 + p.window + 201), "过了时间窗口又可以重新打开")
+        check(p.recording(restartAt: 2000, history: [1000, 1500, 1900]) == [1500, 1900, 2000], "记录时丢弃窗口外的旧记录")
+        check(p.recent([5000, 900], now: 1000) == [900], "时钟往回调时，未来时间的记录不算数")
+        check(p.recent([400, 401], now: 1000) == [401], "正好满一个时间窗口的记录不算数")
+
+        // Which copies are reopened.
+        check(p.applies(arguments: ["/A/Glance.app/Contents/MacOS/Glance"], bundlePath: "/A/Glance.app"), "普通启动会重新打开")
+        check(p.applies(arguments: ["x", p.argument], bundlePath: "/A/Glance.app") && p.applies(arguments: ["x", "--settings"], bundlePath: "/A/Glance.app"), "崩溃后重开和打开设置也算普通启动")
+        check(p.applies(arguments: ["x", "-psn_0_123"], bundlePath: "/A/Glance.app"), "系统传入的单横线参数不影响判断")
+        check(!p.applies(arguments: ["x", "--dock-preview-selftest", "/tmp"], bundlePath: "/A/Glance.app") && !p.applies(arguments: ["x", "--demo"], bundlePath: "/A/Glance.app"), "测试启动不重新打开")
+        check(!p.applies(arguments: ["x"], bundlePath: "/usr/local/bin"), "不在应用包里运行时不重新打开")
+
+        // Settings.
+        check(AdvancedSettings().restartAfterCrash, "默认开启自动重新打开")
+        var plain = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(AdvancedSettings())) as! [String: Any]
+        plain.removeValue(forKey: "restartAfterCrash")
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: plain)).restartAfterCrash, "旧设置没有这一项时默认开启")
+        var off = AdvancedSettings(); off.restartAfterCrash = false
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(off)) == off, "关掉后保存仍然是关的")
+        check(SettingSearchIndex.results("崩溃").first?.section == 6 && SettingSearchIndex.results("闪退").first?.title == "意外退出后自动重新打开", "设置搜索可以找到这个开关")
     }
     static func verifyChineseSearch() {
         func window(_ title: String, app: String = "App") -> WindowDescriptor {

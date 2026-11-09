@@ -295,6 +295,7 @@ struct AdvancedSettings: Codable, Equatable {
     var focusMethod: FocusMethod = .windowServer
     var commandLineEnabled = false
     var dockBadges = true
+    var restartAfterCrash = true
     var browserTabs = false
     /// Apps that are not running, and System Settings pages, appear in search.
     var searchApps = true
@@ -325,7 +326,7 @@ struct AdvancedSettings: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning, searchSkips, shuangpin
         case showSearchHint, shiftSelectsPrevious, voiceOverKeepsOpen, gestureAvoidsSystem, independentGesture
-        case focusMethod, commandLineEnabled, dockBadges, browserTabs, searchApps, searchSettingsPages, numberHints
+        case focusMethod, commandLineEnabled, dockBadges, restartAfterCrash, browserTabs, searchApps, searchSettingsPages, numberHints
         case titleDisplay, titleCut, panelScreen, followCursor, gesture, gestureProfile, haptics, arrowKeys, vimKeys
         case autoPreview, backgroundPreviews, statusBadges, spaceNumbers, tileButtons, showMenuIcon, menuIcon
         case showDelay, fadeOut, previewFadeIn, bindings, exceptions
@@ -349,6 +350,7 @@ struct AdvancedSettings: Codable, Equatable {
         // Before 1.6 the command port was always open; it now starts closed until enabled in 设置 › 通用.
         commandLineEnabled = try c.decodeIfPresent(Bool.self, forKey: .commandLineEnabled) ?? false
         dockBadges = try c.decodeIfPresent(Bool.self, forKey: .dockBadges) ?? true
+        restartAfterCrash = try c.decodeIfPresent(Bool.self, forKey: .restartAfterCrash) ?? true
         browserTabs = try c.decodeIfPresent(Bool.self, forKey: .browserTabs) ?? false
         searchApps = try c.decodeIfPresent(Bool.self, forKey: .searchApps) ?? true
         searchSettingsPages = try c.decodeIfPresent(Bool.self, forKey: .searchSettingsPages) ?? true

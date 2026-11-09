@@ -46,6 +46,29 @@ extension AppDelegate {
         }
     }
 
+    // MARK: Reopening after a crash
+
+    static let crashRestartsKey = "WindowHop.crashRestarts.v1"
+    /// Only the times are kept, to tell one crash from a run of them.
+    func noteCrashRestart() {
+        let store = UserDefaults.standard, now = Date.timeIntervalSinceReferenceDate
+        crashRestarts = CrashRestartPolicy.recent(store.array(forKey: Self.crashRestartsKey) as? [Double] ?? [], now: now)
+        guard CommandLine.arguments.contains(CrashRestartPolicy.argument) else { return }
+        crashRestarts = CrashRestartPolicy.recording(restartAt: now, history: crashRestarts)
+        store.set(crashRestarts, forKey: Self.crashRestartsKey)
+        guard !CrashRestartPolicy.allowsAnother(crashRestarts, now: now) else { return }
+        crashRestartStopped = true
+        DispatchQueue.main.async { [weak self] in
+            self?.showNotice("一瞥在 \(Int(CrashRestartPolicy.window / 60)) 分钟内意外退出了 \(CrashRestartPolicy.limit) 次。这次运行中如果再退出，不会再自动重新打开。\n崩溃报告可以在“控制台”应用的“崩溃报告”里找到。")
+        }
+    }
+    func applyCrashRestart() {
+        let path = Bundle.main.bundleURL.path
+        if settings.value.advanced.restartAfterCrash, !crashRestartStopped, CrashRestartPolicy.applies(arguments: CommandLine.arguments, bundlePath: path) {
+            CrashRestart.arm(appPath: path)
+        } else { CrashRestart.disarm() }
+    }
+
     // MARK: Pinned windows
 
     static let pinsKey = "WindowHop.pinned.v2"

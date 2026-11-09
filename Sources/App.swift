@@ -35,6 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var settingsWindow: NSWindow?
     var settingsModel: SettingsModel?
     var settingsViewLoaded = false
+    /// Reopenings after a crash within the policy's window, and whether they have just gone over its limit.
+    var crashRestarts: [Double] = []
+    var crashRestartStopped = false
     var loadNoticeShown = false
     var localMonitor: Any?
     var globalMonitor: Any?
@@ -193,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         engine.onTitlesChange = { [weak self] changes in self?.updateTitles(changes) }
         gestures.onGesture = { [weak self] result in self?.handleGesture(result) ?? false }
         settings.onChange = { [weak self] in self?.applySettings() }
+        noteCrashRestart()
         applySettings()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self else { return event }
@@ -253,6 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // A crash on the way out does not need undoing.
+        CrashRestart.disarm()
         engine.saveRecentOrder()
         // Every hidden menu bar icon comes back (macOS also ends the request with the process).
         menuBar.releaseAll()
@@ -519,6 +525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applySettings() {
         settingsModel?.synchronize(settings.value)
+        applyCrashRestart()
         menuBar.configure(settings.value.menuBar)
         dockPreview.configure(settings.value.dockPreview)
         WindowControl.preferWindowServer = settings.value.advanced.focusMethod == .windowServer
@@ -705,6 +712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
          "recentOrder": engine.recentOrderCounts,
          "searchHabits": state.habits.count,
+         "crashRestart": ["armed": CrashRestart.armed, "stopped": crashRestartStopped, "recent": crashRestarts.count],
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]

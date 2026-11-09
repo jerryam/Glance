@@ -681,6 +681,8 @@ struct SettingsView: View {
                     do { if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
                     catch { model.note("无法设置自动启动：\(error.localizedDescription)", error: true); model.launchAtLogin = SMAppService.mainApp.status == .enabled }
                 }
+                SettingsToggle("意外退出后自动重新打开", isOn: $model.draft.advanced.restartAfterCrash)
+                SettingsNote("一瞥崩溃后约 2 秒重新打开；10 分钟内已重开 3 次后不再重开，并提示你。自己退出、强制退出或关机时不会重新打开。")
             }
             SettingsGroup("命令行") {
                 SettingsToggle("允许命令行列出和切换窗口", isOn: $model.draft.advanced.commandLineEnabled)

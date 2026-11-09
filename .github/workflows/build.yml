@@ -61,3 +61,7 @@ jobs:
           name: Glance-${{ github.sha }}
           path: Glance.zip
           retention-days: 7
+
+      # Runs the built app: the only step that does. Last, so a failure here still leaves the build to look at.
+      - name: Check that a crash reopens the app
+        run: ./scripts/crash-restart-check.sh
