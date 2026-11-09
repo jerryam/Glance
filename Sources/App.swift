@@ -892,9 +892,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard showing else { return }
         var fromCache = false
         if state.loading {
-            let untouched = cachedPickID != nil && state.selected?.id == cachedPickID && !state.searchVisible
+            // Already waiting for the fresh list: the release timer asks again every 50 ms, and the list settles it.
+            let untouched = !pendingCommit && cachedPickID != nil && state.selected?.id == cachedPickID && !state.searchVisible
             guard QuickCommitPolicy.commitsNow(selectionUntouched: untouched, cacheAge: engine.cacheAge, cacheStale: engine.cacheStale) else {
-                waitedCommitCount += 1
+                if !pendingCommit { waitedCommitCount += 1 }
                 pendingCommit = true; pendingFocusID = state.selected?.id; return
             }
             quickCommitCount += 1
