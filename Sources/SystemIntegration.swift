@@ -119,7 +119,7 @@ final class FrontFullscreenWatch {
 
 struct BrowserTabRef {
     let bundleID: String
-    let windowID: Int
+    let windowID: String
     /// 1-based, as the browsers' scripting interfaces count tabs.
     let tabIndex: Int
     let chromium: Bool
@@ -134,24 +134,56 @@ enum BrowserTabs {
     private struct Browser { let bundleID: String; let chromium: Bool }
     private static let browsers = [Browser(bundleID: "com.apple.Safari", chromium: false),
                                    Browser(bundleID: "com.google.Chrome", chromium: true),
+                                   Browser(bundleID: "com.google.Chrome.beta", chromium: true),
                                    Browser(bundleID: "com.microsoft.edgemac", chromium: true),
                                    Browser(bundleID: "com.brave.Browser", chromium: true),
-                                   Browser(bundleID: "com.vivaldi.Vivaldi", chromium: true)]
+                                   Browser(bundleID: "com.vivaldi.Vivaldi", chromium: true),
+                                   Browser(bundleID: "com.operasoftware.Opera", chromium: true),
+                                   Browser(bundleID: "company.thebrowser.Browser", chromium: true)]
+    /// Other Chromium browsers, among them most made for China, are too many to name and their identifiers cannot be
+    /// confirmed from here. Each running app is checked once for the scripting interface they share. Main queue only.
+    private static var detected: [String: Bool] = [:]
     private static let queue = DispatchQueue(label: "Glance.browserTabs", qos: .userInitiated, attributes: .concurrent)
-    private struct WindowTabs: Decodable { let id: Int; let active: Int; let titles: [String?]; let urls: [String?] }
     private struct RunningBrowser {
         let browser: Browser; let pid: Int32; let name: String; let hidden: Bool; let icon: NSImage?
         /// A relaunched browser is a new key: tabs found in its old process cannot be switched to.
         var key: String { "\(browser.bundleID)|\(pid)" }
     }
     private static var running: [RunningBrowser] {
-        browsers.compactMap { browser -> RunningBrowser? in
+        let found = detected.filter { $0.value }.keys.sorted().map { Browser(bundleID: $0, chromium: true) }
+        return (browsers + found).compactMap { browser -> RunningBrowser? in
             guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first(where: { !$0.isTerminated }) else { return nil }
             return RunningBrowser(browser: browser, pid: app.processIdentifier, name: app.localizedName ?? browser.bundleID, hidden: app.isHidden, icon: app.icon)
         }
     }
     /// Which browsers are running now, always in the same order, under the keys `list` answers with.
     static var runningKeys: [String] { running.map(\.key) }
+    /// Checks the apps that have not been checked yet, then calls back on the main queue: at once when there are none.
+    static func discover(_ done: @escaping () -> Void) {
+        let named = Set(browsers.map(\.bundleID))
+        var found: [String: URL] = [:]
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && !app.isTerminated {
+            guard let id = app.bundleIdentifier, let url = app.bundleURL, !named.contains(id), detected[id] == nil else { continue }
+            found[id] = url
+        }
+        let unchecked = found
+        guard !unchecked.isEmpty else { done(); return }
+        queue.async {
+            let answers = unchecked.mapValues { offersChromiumTabs($0) }
+            DispatchQueue.main.async {
+                detected.merge(answers) { _, new in new }
+                done()
+            }
+        }
+    }
+    /// Reads two files from another app's bundle, off the main thread and only to look for words in them.
+    private static func offersChromiumTabs(_ app: URL) -> Bool {
+        guard let name = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist"))?["OSAScriptingDefinition"] as? String else { return false }
+        let file = app.appendingPathComponent("Contents/Resources").appendingPathComponent((name as NSString).lastPathComponent)
+        guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true,
+              (values.fileSize ?? Int.max) <= BrowserTabScript.dictionaryLimit, let data = try? Data(contentsOf: file) else { return false }
+        return BrowserTabScript.offersChromiumTabs(dictionary: String(decoding: data, as: UTF8.self))
+    }
 
     /// Asks every running browser at once and delivers each answer on the main queue as it arrives: nil when that
     /// browser did not answer. The active tab of each window is left out because the window itself is already listed.
@@ -165,8 +197,9 @@ enum BrowserTabs {
         }
     }
     private static func tabs(of item: RunningBrowser) -> [WindowHandle]? {
-        guard let output = runScript(listScript(item.browser)), let data = output.data(using: .utf8),
-              let windows = try? JSONDecoder().decode([WindowTabs].self, from: data) else { return nil }
+        guard let script = BrowserTabScript.list(bundleID: item.browser.bundleID, chromium: item.browser.chromium),
+              let output = runScript(script), let data = output.data(using: .utf8),
+              let windows = try? JSONDecoder().decode([BrowserWindowTabs].self, from: data) else { return nil }
         var handles: [WindowHandle] = []
         for window in windows {
             for (offset, title) in window.titles.enumerated() where offset + 1 != window.active {
@@ -184,48 +217,15 @@ enum BrowserTabs {
         }
         return handles
     }
-    /// Tabs may have moved since they were listed: the listed position counts only if it still shows that
-    /// address, then the address is looked up, then the title. Reports on the main queue whether the tab is in front.
+    /// Reports on the main queue whether the tab is in front.
     static func activate(_ tab: BrowserTabRef, completion: @escaping (Bool) -> Void) {
-        // Integers go into the script as they are; a tab's address and title only as JSON strings.
-        guard let url = BrowserTabScript.literal(tab.url), let title = BrowserTabScript.literal(tab.title) else { completion(false); return }
-        let titles = tab.chromium ? "w.tabs.title()" : "w.tabs.name()"
-        let select = tab.chromium ? "w.activeTabIndex = index + 1;" : "w.currentTab = w.tabs[index];"
-        let script = """
-        (() => {
-          const app = Application('\(tab.bundleID)');
-          const w = app.windows.byId(\(tab.windowID));
-          const urls = w.tabs.url().map(u => u || '');
-          let index = \(tab.tabIndex - 1);
-          if (urls[index] !== \(url)) {
-            index = urls.indexOf(\(url));
-            if (index < 0 && \(title) !== '') index = \(titles).indexOf(\(title));
-            if (index < 0) return 'gone';
-          }
-          \(select)
-          w.index = 1;
-          app.activate();
-          return 'ok';
-        })()
-        """
+        guard let script = BrowserTabScript.activate(bundleID: tab.bundleID, windowID: tab.windowID, tabIndex: tab.tabIndex, url: tab.url, title: tab.title, chromium: tab.chromium) else {
+            completion(false); return
+        }
         queue.async {
             let answer = runScript(script, timeout: 5)
             DispatchQueue.main.async { completion(answer == "ok") }
         }
-    }
-    private static func listScript(_ browser: Browser) -> String {
-        let active = browser.chromium ? "w.activeTabIndex()" : "w.currentTab.index()"
-        let titles = browser.chromium ? "w.tabs.title()" : "w.tabs.name()"
-        return """
-        (() => {
-          const app = Application('\(browser.bundleID)');
-          const out = [];
-          for (const w of app.windows()) {
-            try { out.push({ id: w.id(), active: \(active), titles: \(titles), urls: w.tabs.url() }); } catch (e) {}
-          }
-          return JSON.stringify(out);
-        })()
-        """
     }
     /// Runs a JavaScript for Automation snippet in a child process, so a slow or blocked browser never
     /// stalls 一瞥. The first run per browser waits for the user's permission answer.

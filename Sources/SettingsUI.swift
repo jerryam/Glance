@@ -473,7 +473,7 @@ struct SettingsView: View {
                 SettingsToggle("容忍英文或完整拼音的一处拼写错误", isOn: $model.draft.advanced.searchTypos)
                 SettingsNote("名称匹配优先于拼音、首字母和拼写容错；同等匹配优先最近使用的窗口。四个字符起支持一处错字、漏字、多字或相邻字母颠倒。")
                 SettingsToggle("搜索时包含浏览器标签页", isOn: $model.draft.advanced.browserTabs)
-                SettingsNote("支持 Safari、Chrome、Edge、Brave 和 Vivaldi。只在搜索时读取正在运行的浏览器的标签页标题和网址，不读取网页内容；第一次使用时，macOS 会询问是否允许一瞥控制该浏览器。")
+                SettingsNote("支持 Safari、Chrome、Chrome Beta、Edge、Brave、Vivaldi、Opera 和 Arc，也支持提供相同脚本接口的其他 Chromium 浏览器，比如部分国产浏览器。只在搜索时读取正在运行的浏览器的标签页标题和网址，不读取网页内容；第一次使用时，macOS 会询问是否允许一瞥控制该浏览器。")
                 SettingsToggle("搜索时包含未打开的应用", isOn: $model.draft.advanced.searchApps)
                 SettingsToggle("搜索时包含系统设置页面", isOn: $model.draft.advanced.searchSettingsPages)
                 SettingsNote("像 Windows 的开始菜单一样：输入应用或设置的名称（中文、拼音或英文都可以），回车即可打开，例如“wx”打开微信、“蓝牙”打开蓝牙设置。匹配程度相同时排在已打开的窗口后面，每次最多列出 \(WindowSearch.launcherLimit) 项。")

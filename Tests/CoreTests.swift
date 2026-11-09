@@ -1,5 +1,6 @@
 import Foundation
 import ApplicationServices
+import JavaScriptCore
 
 @main
 struct CoreTests {
@@ -274,7 +275,110 @@ struct CoreTests {
         verifyWindowShortcuts()
         verifySettingsEntry()
         verifyRecentOrder()
+        verifyBrowserScripts()
         print("\(passed) checks passed")
+    }
+    /// Runs the real scripts in JavaScriptCore against stand-ins for each kind of browser. This proves the scripts parse
+    /// and take the right path; only a Mac with the browsers installed can prove the browsers answer the same way.
+    static func verifyBrowserScripts() {
+        let stubs = #"""
+        var requested = '', selected = '', raised = false, activated = false, hacked = false;
+        function evil() { hacked = true; }
+        function tabList(list) {
+          const tabs = list.map(t => ({ select() { selected = t.title; } }));
+          tabs.title = () => list.map(t => t.title);
+          tabs.name = tabs.title;
+          tabs.url = () => list.map(t => t.url);
+          tabs.id = () => list.map(t => t.id);
+          return tabs;
+        }
+        function plain(id, list, stuck) {
+          const w = { id: () => id, tabs: tabList(list) };
+          Object.defineProperty(w, 'index', { set() { if (stuck) throw new Error('stuck'); raised = true; } });
+          return w;
+        }
+        function chromium(id, active, list, stuck) {
+          const w = plain(id, list, stuck);
+          Object.defineProperty(w, 'activeTabIndex', { get: () => () => active, set(v) { selected = list[v - 1].title; } });
+          return w;
+        }
+        function arc(id, activeID, list) {
+          const w = plain(id, list);
+          w.activeTab = { id: () => activeID };
+          return w;
+        }
+        function safari(id, active, list) {
+          const w = plain(id, list);
+          Object.defineProperty(w, 'currentTab', { get: () => ({ index: () => active }), set(tab) { selected = list[w.tabs.indexOf(tab)].title; } });
+          return w;
+        }
+        function Application(id) {
+          requested = id;
+          return { windows: () => windows, activate() { activated = true; } };
+        }
+        var sample = [{ id: 'x', title: '甲', url: 'u1' }, { id: 'y', title: '乙', url: 'u2' }, { id: 'z', title: '丙', url: '' }];
+        """#
+        func run(_ script: String?, windows: String) -> (answer: String, selected: String, raised: Bool, activated: Bool, requested: String, hacked: Bool) {
+            guard let script, let context = JSContext() else { return ("没有脚本", "", false, false, "", false) }
+            context.evaluateScript(stubs)
+            context.evaluateScript("var windows = [\(windows)];")
+            let answer = context.evaluateScript(script)
+            if let failure = context.exception { return ("脚本出错：\(failure)", "", false, false, "", false) }
+            func text(_ name: String) -> String { context.objectForKeyedSubscript(name)?.toString() ?? "" }
+            return (answer?.toString() ?? "", text("selected"), text("raised") == "true", text("activated") == "true", text("requested"), text("hacked") == "true")
+        }
+        func listing(_ windows: String, bundleID: String = "b", chromium: Bool = true) -> String {
+            let answer = run(BrowserTabScript.list(bundleID: bundleID, chromium: chromium), windows: windows).answer
+            let decoded = try? JSONDecoder().decode([BrowserWindowTabs].self, from: Data(answer.utf8))
+            return (decoded ?? []).map { window -> String in
+                let titles = window.titles.map { $0 ?? "空" }.joined(separator: ",")
+                let urls = window.urls.map { $0 ?? "空" }.joined(separator: ",")
+                return "\(window.id)|\(window.active)|\(titles)|\(urls)"
+            }.joined(separator: ";")
+        }
+        let tabs = "甲,乙,丙|u1,u2,"
+        check(listing("chromium('w1', 2, sample)") == "w1|2|\(tabs)", "Chromium：窗口编号是文本时也能读出标签页")
+        check(listing("chromium(7, 1, sample)") == "7|1|\(tabs)", "较旧的 Chromium：窗口编号是数字时同样能读")
+        check(listing("arc('w1', 'y', sample)") == "w1|2|\(tabs)", "Arc：没有当前标签页序号，用当前标签页的编号算出来")
+        check(listing("safari(9, 3, sample)", chromium: false) == "9|3|\(tabs)", "Safari 仍然用它自己的接口")
+        check(listing("arc('w1', 'none', sample)") == "w1|0|\(tabs)", "找不到当前标签页时记为 0，所有标签页都列出")
+        check(listing("plain('w1', sample)") == "w1|0|\(tabs)", "连当前标签页都不提供的浏览器，所有标签页也都列出")
+        check(listing("{ id() { throw new Error('closing'); } }, chromium('w2', 1, sample)") == "w2|1|\(tabs)", "读不出的窗口被跳过，不影响其他窗口")
+        check(listing("") == "", "没有窗口时列表为空")
+
+        func activate(_ windows: String, windowID: String = "w1", index: Int = 2, url: String = "u2", title: String = "乙", chromium: Bool = true) -> (answer: String, selected: String, raised: Bool, activated: Bool, requested: String, hacked: Bool) {
+            run(BrowserTabScript.activate(bundleID: "b", windowID: windowID, tabIndex: index, url: url, title: title, chromium: chromium), windows: windows)
+        }
+        let direct = activate("chromium('w1', 1, sample)")
+        check(direct.answer == "ok" && direct.selected == "乙", "Chromium：用序号切换标签页")
+        check(direct.raised && direct.activated, "切换后窗口到最前，浏览器到前台")
+        check(activate("arc('w1', 'x', sample)").selected == "乙", "Arc：没有序号时用 select 切换")
+        check(activate("safari('w1', 1, sample)", chromium: false).selected == "乙", "Safari：用 currentTab 切换")
+        check(activate("chromium(7, 1, sample)", windowID: "7").answer == "ok", "数字编号的窗口也能按文本找到")
+        check(activate("chromium('w0', 1, sample), chromium('w1', 1, sample)").answer == "ok", "在多个窗口里找到对应的那个")
+        check(activate("chromium('w1', 1, sample, true)").answer == "ok", "窗口提不到最前也算切换成功")
+        check(activate("chromium('w1', 1, sample)", index: 1).selected == "乙", "标签页移动后按网址找到")
+        check(activate("chromium('w1', 1, sample)", index: 1, url: "changed", title: "甲").selected == "甲", "网址也变了时按标题找到")
+        check(activate("safari('w1', 1, sample)", index: 1, url: "changed", title: "丙", chromium: false).selected == "丙", "Safari 按标题找时用它自己的接口")
+        check(activate("chromium('w1', 1, sample)", index: 3, url: "").selected == "丙", "没有网址的标签页也能按位置切换")
+        let closed = activate("chromium('w1', 1, sample)", index: 1, url: "changed", title: "没有")
+        check(closed.answer == "gone" && closed.selected.isEmpty && !closed.activated, "标签页已经关闭时如实报告，不切换")
+        check(activate("chromium('w1', 1, sample)", url: "changed", title: "").answer == "gone", "没有标题时不会误配空标题")
+        let noWindow = activate("chromium('w1', 1, sample)", windowID: "w9")
+        check(noWindow.answer == "gone" && !noWindow.activated, "窗口已经关闭时如实报告")
+
+        for hostile in ["x'); evil(); ('", "\"); evil(); (\"", "`${evil()}`", "\\\"); evil(); //"] {
+            let listed = run(BrowserTabScript.list(bundleID: hostile, chromium: true), windows: "")
+            check(!listed.hacked && listed.requested == hostile, "应用标识来自别的应用，只能作为字符串进入脚本")
+            let chosen = run(BrowserTabScript.activate(bundleID: hostile, windowID: hostile, tabIndex: 1, url: hostile, title: hostile, chromium: true), windows: "chromium('w1', 1, sample)")
+            check(!chosen.hacked && chosen.requested == hostile && chosen.answer == "gone", "窗口编号、网址和标题也不能变成代码")
+        }
+
+        let dictionary = #"<class name="window"><property name="active tab" code="acTa"/><property name="active tab index" code="acTI"/></class><class name="tab" code="CrTb"><property name="URL" code="URL "/></class>"#
+        check(BrowserTabScript.offersChromiumTabs(dictionary: dictionary), "提供 Chromium 脚本接口的应用算浏览器")
+        check(!BrowserTabScript.offersChromiumTabs(dictionary: #"<class name="tab"><property name="URL"/><property name="current tab"/></class>"#), "Safari 式的接口不走 Chromium 脚本")
+        check(!BrowserTabScript.offersChromiumTabs(dictionary: #"<class name="tab"><property name="selected tab"/></class>"#), "终端这类有标签页但没有网址的应用不算")
+        check(!BrowserTabScript.offersChromiumTabs(dictionary: ""), "没有脚本接口的应用不算")
     }
     static func verifyRecentOrder() {
         func window(_ id: String, pid: Int32, bundle: String, title: String = "机密标题") -> WindowDescriptor {

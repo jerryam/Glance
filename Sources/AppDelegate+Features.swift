@@ -138,10 +138,14 @@ extension AppDelegate {
         browserTabs.keep(only: BrowserTabs.runningKeys)
         // Last time's tabs show at once; each browser's answer then replaces its own, even after the panel has closed.
         updateExtraItems()
-        BrowserTabs.list { [weak self] browser, tabs in
+        BrowserTabs.discover { [weak self] in
             guard let self else { return }
-            self.browserTabs.update(browser, tabs: tabs)
-            if self.showing, self.showGeneration == generation { self.updateExtraItems() }
+            self.browserTabs.keep(only: BrowserTabs.runningKeys)
+            BrowserTabs.list { [weak self] browser, tabs in
+                guard let self else { return }
+                self.browserTabs.update(browser, tabs: tabs)
+                if self.showing, self.showGeneration == generation { self.updateExtraItems() }
+            }
         }
     }
     /// The panel stays until the browser has answered, so a tab that cannot be reached can say why, like any

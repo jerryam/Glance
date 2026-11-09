@@ -469,6 +469,75 @@ enum BrowserTabScript {
     static func literal(_ text: String) -> String? {
         (try? JSONEncoder().encode(text)).flatMap { String(data: $0, encoding: .utf8) }
     }
+    /// Browsers built on Chromium keep different amounts of its scripting interface: Arc has no active tab index and
+    /// selects a tab with a command. So the scripts ask what this browser offers, one step at a time.
+    static func list(bundleID: String, chromium: Bool) -> String? {
+        guard let app = literal(bundleID) else { return nil }
+        let active = chromium ? "w.activeTabIndex !== undefined ? w.activeTabIndex() : w.tabs.id().indexOf(w.activeTab.id()) + 1" : "w.currentTab.index()"
+        let titles = chromium ? "w.tabs.title()" : "w.tabs.name()"
+        return """
+        (() => {
+          const app = Application(\(app));
+          const activeOf = w => { try { return \(active); } catch (e) { return 0; } };
+          const out = [];
+          for (const w of app.windows()) {
+            try { out.push({ id: w.id(), active: activeOf(w), titles: \(titles), urls: w.tabs.url() }); } catch (e) {}
+          }
+          return JSON.stringify(out);
+        })()
+        """
+    }
+    /// Tabs may have moved since they were listed: the listed position counts only if it still shows that
+    /// address, then the address is looked up, then the title. Windows are compared as text because a browser
+    /// may report its ids either way.
+    static func activate(bundleID: String, windowID: String, tabIndex: Int, url: String, title: String, chromium: Bool) -> String? {
+        guard let app = literal(bundleID), let window = literal(windowID), let url = literal(url), let title = literal(title) else { return nil }
+        let titles = chromium ? "w.tabs.title()" : "w.tabs.name()"
+        let select = chromium ? "if (w.activeTabIndex !== undefined) w.activeTabIndex = index + 1; else w.tabs[index].select();" : "w.currentTab = w.tabs[index];"
+        return """
+        (() => {
+          const app = Application(\(app));
+          const w = app.windows().find(x => String(x.id()) === \(window));
+          if (!w) return 'gone';
+          const urls = w.tabs.url().map(u => u || '');
+          let index = \(tabIndex - 1);
+          if (urls[index] !== \(url)) {
+            index = urls.indexOf(\(url));
+            if (index < 0 && \(title) !== '') index = \(titles).indexOf(\(title));
+            if (index < 0) return 'gone';
+          }
+          \(select)
+          try { w.index = 1; } catch (e) {}
+          app.activate();
+          return 'ok';
+        })()
+        """
+    }
+    /// Larger than any scripting dictionary: another app's file is not read without limit.
+    static let dictionaryLimit = 2_000_000
+    /// Whether an app's scripting dictionary offers what these scripts use. Chromium's has all three; Safari's says
+    /// "current tab", and a terminal's tabs have no address.
+    static func offersChromiumTabs(dictionary text: String) -> Bool {
+        text.contains("name=\"active tab\"") && text.contains("name=\"tab\"") && text.contains("name=\"URL\"")
+    }
+}
+
+/// One browser window as the scripts above report it.
+struct BrowserWindowTabs: Decodable {
+    /// Text in Chromium since 2023 and in Arc, a number in Safari and older Chromium.
+    let id: String
+    /// 1-based. 0 when the browser cannot say which tab is active, and then every tab is listed.
+    let active: Int
+    let titles: [String?]
+    let urls: [String?]
+    private enum CodingKeys: String, CodingKey { case id, active, titles, urls }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        if let number = try? values.decode(Int.self, forKey: .id) { id = String(number) } else { id = try values.decode(String.self, forKey: .id) }
+        active = (try? values.decode(Int.self, forKey: .active)) ?? 0
+        titles = try values.decode([String?].self, forKey: .titles)
+        urls = try values.decode([String?].self, forKey: .urls)
+    }
 }
 
 /// A pinned window as it is saved. A window number only means something until the window server restarts, so a
@@ -611,7 +680,7 @@ enum SettingSearchIndex {
         .init(1, "面板输入方式", "直接 搜索 传统 单键"), .init(1, "显示面板搜索提示", "search hint"),
         .init(1, "搜索优先显示名称直接匹配的窗口", "排序 匹配 拼音"),
         .init(1, "容忍英文或完整拼音的一处拼写错误", "容错 拼音 typo pinyin"),
-        .init(1, "搜索时包含浏览器标签页", "Safari Chrome Edge 标签 tab 浏览器 网页 网址"),
+        .init(1, "搜索时包含浏览器标签页", "Safari Chrome Edge Arc Opera 标签 tab 浏览器 网页 网址"),
         .init(1, "搜索时包含未打开的应用", "启动 打开 开始菜单 start launcher 应用程序"),
         .init(1, "搜索时包含系统设置页面", "系统设置 偏好设置 蓝牙 网络 显示器 settings preferences"),
         .init(1, "按 Shift 单独反向选择", "反向 上一个 单修饰键"),
