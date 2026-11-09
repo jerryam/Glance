@@ -161,6 +161,12 @@ enum NativeBridge {
         _ = function(1, enabled)
         _ = function(2, enabled)
     }
+    /// Locks at once, whatever the password settings say. False when the call is not there to make.
+    static func lockScreen() -> Bool {
+        typealias Lock = @convention(c) () -> Int32
+        guard let function = symbol(dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY), "SACLockScreenImmediate", as: Lock.self) else { return false }
+        return function() == 0
+    }
     static func menuBarDisplay() -> String? {
         typealias CopyDisplay = @convention(c) (UInt32) -> Unmanaged<CFString>?
         guard let connection, let function = symbol(skyLight, "CGSCopyActiveMenuBarDisplayIdentifier", as: CopyDisplay.self) else { return nil }

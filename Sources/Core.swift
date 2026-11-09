@@ -415,10 +415,52 @@ struct SettingsArchive: Codable {
 }
 
 /// What a search result opens when it is not a window.
-enum LaunchKind: Equatable {
-    case app, setting
-    var label: String { self == .app ? "未打开的应用" : "系统设置" }
-    var symbol: String { self == .app ? "arrow.up.forward.app" : "gearshape" }
+enum LaunchKind: Equatable, CaseIterable {
+    case app, setting, command, file, calculation, web
+    var label: String {
+        switch self {
+        case .app: return "未打开的应用"
+        case .setting: return "系统设置"
+        case .command: return "系统命令"
+        case .file: return "文件"
+        case .calculation: return "计算结果"
+        case .web: return "用浏览器打开"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .app: return "arrow.up.forward.app"
+        case .setting: return "gearshape"
+        case .command: return "power"
+        case .file: return "doc"
+        case .calculation: return "equal.circle"
+        case .web: return "globe"
+        }
+    }
+    /// What Return does, on a button.
+    var action: String { self == .calculation ? "复制" : "打开" }
+    /// What Return does, in a sentence.
+    var hint: String {
+        switch self {
+        case .app: return "按 ↩ 打开这个应用"
+        case .setting: return "按 ↩ 打开这个设置页"
+        case .command: return "按 ↩ 执行这个命令"
+        case .file: return "按 ↩ 打开这个文件"
+        case .calculation: return "按 ↩ 复制结果"
+        case .web: return "按 ↩ 用默认浏览器打开"
+        }
+    }
+    /// Made from what was typed, so there is nothing to match the typing against.
+    var madeFromQuery: Bool { self == .calculation || self == .web }
+    /// Its place among the results: a sum first, what comes from the disk or the web after the rest.
+    var place: Int {
+        switch self {
+        case .calculation: return 0
+        case .app, .setting, .command: return 1
+        case .file: return 2
+        case .web: return 3
+        }
+    }
 }
 
 struct WindowDescriptor: Identifiable, Equatable {
@@ -457,6 +499,8 @@ struct WindowDescriptor: Identifiable, Equatable {
     var settingsWindow = false
     /// Secondary text, such as a tab's web address.
     var subtitle: String? = nil
+    /// What a result made from the search opens or copies: a file's path, a web address, the answer to a sum.
+    var launchTarget: String? = nil
     var pinned = false
     /// Number of windows folded into this entry when grouping by app.
     var groupCount = 0

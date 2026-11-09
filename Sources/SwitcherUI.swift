@@ -10,7 +10,11 @@ struct ZoomFrame {
 }
 
 final class SwitcherState: ObservableObject {
-    @Published var query = "" { didSet { guard query != oldValue else { return }; if !query.isEmpty { sticky = true }; refilter(reset: true) } }
+    @Published var query = "" { didSet { guard query != oldValue else { return }; if !query.isEmpty { sticky = true }; refilter(reset: true); onQueryChange?(query) } }
+    var onQueryChange: ((String) -> Void)?
+    /// Rows made from what was typed: a sum's answer, a web search.
+    var queryItems: ((String) -> [WindowHandle])?
+    var onRevealFile: ((String) -> Void)?
     @Published var searchVisible = false
     @Published var items: [WindowHandle] = []
     @Published var selectedIndex = 0 { didSet { if selectedIndex != oldValue { onSelectionChanged?() } } }
@@ -100,7 +104,7 @@ final class SwitcherState: ObservableObject {
     }
     func refilter(reset: Bool) {
         let start = ProcessInfo.processInfo.systemUptime
-        let source = all + ownItems + extraItems
+        let source = all + ownItems + extraItems + (queryItems?(query) ?? [])
         let pinned = pinnedIDs
         let descriptors = WindowSearch.filtered(source.map { handle in
                 var descriptor = handle.descriptor; descriptor.pinned = pinned.contains(descriptor.id); return descriptor
@@ -112,7 +116,10 @@ final class SwitcherState: ObservableObject {
         // Keep the filtered descriptor (pin and group count) with the handle that the card shows.
         items = descriptors.compactMap { descriptor in handles[descriptor.id].map { $0.with(descriptor) } }
         if reset { selectedIndex = 0 }
-        else if let previousID, let index = items.firstIndex(where: { $0.id == previousID }) { selectedIndex = index }
+        else if let previousID, let index = items.firstIndex(where: { $0.id == previousID }) {
+            // A web search selected only for being the first row gives way to files found after it.
+            selectedIndex = selectedIndex == 0 && items[index].descriptor.launcher == .web ? 0 : index
+        }
         else { selectedIndex = min(selectedIndex, max(0, items.count - 1)) }
         if previousID != selected?.id { onSelectionChanged?() }
         onLayout?()
@@ -362,7 +369,10 @@ private struct WindowActionsMenu: View {
     var body: some View {
         Group {
             if includeSwitch {
-                Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launcher != nil ? "打开" : "切换到窗口")) { state.selectWindow(item.id, commit: true) }
+                Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launcher?.action ?? "切换到窗口")) { state.selectWindow(item.id, commit: true) }
+            }
+            if item.descriptor.launcher == .file, let path = item.descriptor.launchTarget {
+                Button("在访达中显示") { state.onRevealFile?(path) }
             }
             if !item.descriptor.searchOnly && !item.descriptor.settingsWindow {
                 Button(item.descriptor.pinned ? "取消置顶" : "置顶这个窗口") { state.onTogglePin?(item.id) }
@@ -552,7 +562,7 @@ private struct PreviewImage: View {
     private var placeholder: String {
         if item.descriptor.browserTab { return item.descriptor.subtitle ?? "浏览器标签页" }
         if item.descriptor.menuBarItem { return "按 ↩ 打开它的菜单" }
-        if let kind = item.descriptor.launcher { return kind == .app ? "按 ↩ 打开这个应用" : "按 ↩ 打开这个设置页" }
+        if let kind = item.descriptor.launcher { return kind.hint }
         if item.descriptor.settingsWindow { return "一瞥的设置窗口" }
         if item.descriptor.windowless { return "没有打开的窗口" }
         if item.descriptor.minimized { return "窗口已最小化" }
@@ -1042,7 +1052,7 @@ private struct SearchDetail: View {
                     }
                     Spacer(minLength: 8)
                     // In the demo this closes the panel, like Return does.
-                    Button(item.descriptor.launcher != nil ? "打开 ↵" : (item.descriptor.menuBarItem ? "打开菜单 ↵" : "切换 ↵")) {
+                    Button(item.descriptor.launcher.map { "\($0.action) ↵" } ?? (item.descriptor.menuBarItem ? "打开菜单 ↵" : "切换 ↵")) {
                         state.onSelect?(state.selectedIndex, true)
                     }.buttonStyle(GlanceButtonStyle(primary: true, compact: true))
                 }

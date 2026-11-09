@@ -414,6 +414,105 @@ enum DockPreviewPolicy {
     }
 }
 
+/// The start menu's commands. Anything that ends the session asks first: restart, shut down and log out through the
+/// system's own dialog, emptying the Trash through 一瞥's.
+enum SystemCommand: String, CaseIterable {
+    case lockScreen, sleep, displayOff, screenSaver, restart, shutDown, logOut, emptyTrash
+    var title: String {
+        switch self {
+        case .lockScreen: return "锁定屏幕"
+        case .sleep: return "睡眠"
+        case .displayOff: return "关闭显示器"
+        case .screenSaver: return "屏幕保护程序"
+        case .restart: return "重新启动…"
+        case .shutDown: return "关机…"
+        case .logOut: return "退出登录…"
+        case .emptyTrash: return "清空废纸篓…"
+        }
+    }
+    var english: String {
+        switch self {
+        case .lockScreen: return "Lock Screen"
+        case .sleep: return "Sleep"
+        case .displayOff: return "Turn Display Off"
+        case .screenSaver: return "Screen Saver"
+        case .restart: return "Restart"
+        case .shutDown: return "Shut Down"
+        case .logOut: return "Log Out"
+        case .emptyTrash: return "Empty Trash"
+        }
+    }
+    /// Other words it goes by. The name's own pinyin is found without help.
+    var keywords: String {
+        switch self {
+        case .lockScreen: return "锁屏 suoping sp"
+        case .sleep: return "休眠 待机 xiumian daiji standby"
+        case .displayOff: return "关屏 息屏 guanping xiping screen off"
+        case .screenSaver: return "屏保 pingbao screensaver"
+        case .restart: return "重启 chongqi reboot"
+        case .shutDown: return "关闭电脑 shutdown poweroff"
+        case .logOut: return "注销 登出 zhuxiao dengchu logout signout"
+        case .emptyTrash: return "回收站 删除 huishouzhan trash"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .lockScreen: return "lock"
+        case .sleep: return "moon"
+        case .displayOff: return "display"
+        case .screenSaver: return "sparkles.tv"
+        case .restart: return "arrow.clockwise"
+        case .shutDown: return "power"
+        case .logOut: return "rectangle.portrait.and.arrow.right"
+        case .emptyTrash: return "trash"
+        }
+    }
+    /// Whether it stops for a confirmation before anything happens.
+    var asksFirst: Bool { self == .restart || self == .shutDown || self == .logOut || self == .emptyTrash }
+    /// What runs it. Locking first tries a direct call, and turning the display off is what remains if that is gone.
+    var program: (path: String, arguments: [String]) {
+        func script(_ source: String) -> (path: String, arguments: [String]) { ("/usr/bin/osascript", ["-e", source]) }
+        switch self {
+        case .lockScreen, .displayOff: return ("/usr/bin/pmset", ["displaysleepnow"])
+        case .sleep: return ("/usr/bin/pmset", ["sleepnow"])
+        case .screenSaver: return ("/usr/bin/open", ["/System/Library/CoreServices/ScreenSaverEngine.app"])
+        // The “show the dialog” events of loginwindow: the system asks, and nothing happens if the answer is no.
+        case .restart: return script("tell application \"loginwindow\" to «event aevtrrst»")
+        case .shutDown: return script("tell application \"loginwindow\" to «event aevtrsdn»")
+        case .logOut: return script("tell application \"loginwindow\" to «event aevtlogo»")
+        case .emptyTrash: return script("tell application \"Finder\" to empty trash")
+        }
+    }
+}
+
+/// Which files a search lists. Names come from Spotlight and stay in memory: nothing about them is written down.
+enum FileSearchPolicy {
+    static let limit = 8
+    /// How many Spotlight answers to look through for that many worth listing.
+    static let looked = 60
+    static let shortest = 2
+    /// The words to look for, without the characters Spotlight would read as wildcards.
+    static func tokens(_ query: String) -> [String] {
+        let words = query.split(whereSeparator: { $0.isWhitespace }).map { word in String(word.filter { !"*?\\\"'".contains($0) }) }.filter { !$0.isEmpty }
+        return words.joined().count >= shortest ? Array(words.prefix(5)) : []
+    }
+    /// The user's own files: not hidden ones, not what apps keep in Library, not apps (which the search lists anyway).
+    static func keeps(path: String, home: String) -> Bool {
+        guard path.hasPrefix(home + "/"), !path.hasPrefix(home + "/Library/") else { return false }
+        let inside = path.dropFirst(home.count + 1).split(separator: "/")
+        return !inside.contains { $0.hasPrefix(".") || $0.hasSuffix(".app") }
+    }
+    static func kept(_ paths: [String], home: String) -> [String] {
+        Array(paths.filter { keeps(path: $0, home: home) }.prefix(limit))
+    }
+    /// Where it is, for the line under its name.
+    static func place(of path: String, home: String) -> String {
+        let folder = (path as NSString).deletingLastPathComponent
+        if folder == home { return "~" }
+        return folder.hasPrefix(home + "/") ? "~" + String(folder.dropFirst(home.count)) : folder
+    }
+}
+
 /// 设置 › 通用 › 意外退出后自动重新打开: what runs after a crash, and when to stop trying.
 enum CrashRestartPolicy {
     /// Tells the new copy why it was opened.
@@ -750,6 +849,9 @@ enum SettingSearchIndex {
         .init(1, "搜索时包含浏览器标签页","Safari Chrome Edge Arc Opera 标签 tab 浏览器 网页 网址"),
         .init(1, "搜索时包含未打开的应用", "启动 打开 开始菜单 start launcher 应用程序"),
         .init(1, "搜索时包含系统设置页面", "系统设置 偏好设置 蓝牙 网络 显示器 settings preferences"),
+        .init(1, "搜索时包含系统命令", "开始菜单 锁屏 睡眠 关机 重启 注销 废纸篓 lock sleep restart shutdown logout"),
+        .init(1, "搜索时查找文件", "开始菜单 文件 文档 聚焦 spotlight file finder"), .init(1, "搜索时计算算式", "开始菜单 计算器 calculator 算式 加减乘除"),
+        .init(1, "在结果最后提供网页搜索", "开始菜单 浏览器 百度 必应 google bing web 网址"), .init(1, "搜索引擎", "百度 必应 google bing duckduckgo 网页搜索"),
         .init(1, "按 Shift 单独反向选择", "反向 上一个 单修饰键"),
         .init(1, "使用方向键选择窗口", "arrow"), .init(1, "使用 H / J / K / L 选择窗口", "vim"),
         .init(1, "面板中的快捷键 · 点击按键可重新录制", "录制 关闭 退出 最小化 按键 半屏 填满 屏幕 置顶"),

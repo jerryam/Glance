@@ -196,8 +196,93 @@ extension AppDelegate {
         guard showing, !state.isDemo else { return }
         let advanced = settings.value.advanced
         state.extraItems = (advanced.browserTabs ? browserTabs.all : []) + menuBar.searchResults()
-            + launcher.results(apps: advanced.searchApps, settingsPages: advanced.searchSettingsPages)
+            + launcher.results(apps: advanced.searchApps, settingsPages: advanced.searchSettingsPages, commands: advanced.searchCommands)
+            + (advanced.searchFiles ? fileSearch.results : [])
         if !state.query.isEmpty { state.refilter(reset: false) }
+    }
+
+    // MARK: The rest of the start menu
+
+    /// A file search for each pause in the typing, which a sum does not need.
+    func queryChanged(_ query: String) {
+        let advanced = settings.value.advanced
+        guard showing, !state.isDemo, advanced.searchFiles, !(advanced.searchCalculator && Calculator.evaluate(query) != nil) else { fileSearch.cancel(); return }
+        fileSearch.search(query)
+    }
+    /// Rows made from what was typed. Nothing here touches the network: a web row is only an address until it is chosen.
+    func queryItems(for query: String) -> [WindowHandle] {
+        guard showing, !state.isDemo, !query.isEmpty else { return [] }
+        let advanced = settings.value.advanced
+        func row(_ id: String, kind: LaunchKind, title: String, detail: String, target: String) -> WindowHandle {
+            var descriptor = WindowDescriptor(id: id, windowID: nil, pid: 0, appName: detail, bundleID: "", title: title,
+                                              minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            descriptor.launcher = kind
+            descriptor.launchTarget = target
+            return WindowHandle(descriptor: descriptor, ax: nil, icon: NSImage(systemSymbolName: kind.symbol, accessibilityDescription: nil))
+        }
+        var rows: [WindowHandle] = []
+        if advanced.searchCalculator, let value = Calculator.evaluate(query) {
+            let answer = Calculator.format(value)
+            rows.append(row("query:calculation", kind: .calculation, title: "= \(answer)", detail: query, target: answer))
+        }
+        if advanced.searchWeb {
+            let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let address = WebAddress.url(from: text) {
+                rows.append(row("query:web", kind: .web, title: "打开 \(text)", detail: address.host ?? text, target: address.absoluteString))
+            } else if text.count <= 200, let url = advanced.webEngine.url(for: text) {
+                rows.append(row("query:web", kind: .web, title: "用\(advanced.webEngine.label)搜索“\(text)”", detail: advanced.webEngine.label, target: url.absoluteString))
+            }
+        }
+        return rows
+    }
+    func openLauncherItem(_ descriptor: WindowDescriptor) -> Bool {
+        switch descriptor.launcher {
+        case .app, .setting:
+            return launcher.open(descriptor.id)
+        case .command:
+            guard let command = SystemCommand(rawValue: descriptor.bundleID) else { return false }
+            runSystemCommand(command)
+            return true
+        case .file:
+            guard let path = descriptor.launchTarget else { return false }
+            return NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        case .web:
+            // Only ever built here as http or https; checked again because this is where it leaves for the browser.
+            guard let target = descriptor.launchTarget, let url = URL(string: target), ["http", "https"].contains((url.scheme ?? "").lowercased()) else { return false }
+            return NSWorkspace.shared.open(url)
+        case .calculation:
+            guard let answer = descriptor.launchTarget else { return false }
+            NSPasteboard.general.clearContents()
+            return NSPasteboard.general.setString(answer, forType: .string)
+        case nil:
+            return false
+        }
+    }
+    func runSystemCommand(_ command: SystemCommand) {
+        guard command == .emptyTrash else { Self.start(command); return }
+        // On a turn of its own, as this is called while the panel closes.
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "要清空废纸篓吗？"
+            alert.informativeText = "废纸篓里的所有项目都会被永久删除，不能恢复。"
+            alert.addButton(withTitle: "清空废纸篓"); alert.addButton(withTitle: "取消")
+            if alert.runModal() == .alertFirstButtonReturn { Self.start(command) }
+        }
+    }
+    private static func start(_ command: SystemCommand) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if command == .lockScreen, NativeBridge.lockScreen() { return }
+            let program = command.program
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: program.path)
+            process.arguments = program.arguments
+            // Most likely macOS refused the Automation permission: a sound rather than nothing at all.
+            process.terminationHandler = { finished in
+                if finished.terminationStatus != 0 { DispatchQueue.main.async { NSSound.beep() } }
+            }
+            do { try process.run() } catch { DispatchQueue.main.async { NSSound.beep() } }
+        }
     }
 
     // MARK: Search habits

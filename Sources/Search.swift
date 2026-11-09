@@ -184,6 +184,7 @@ enum WindowSearch {
             if settings.advanced.exceptions.contains(where: { $0.hides(w) }) { return false }
             let text = normalized("\(w.appName) \(w.bundleID) \(w.title)")
             if excluded.contains(where: { text.contains($0.trimmingCharacters(in: .whitespaces)) }) { return false }
+            if w.launcher?.madeFromQuery == true { quality[w.id] = SearchQuality(weakest: 15, total: 15); return true }
             guard let rank = rank(w, tokens: tokens, allowTypos: settings.advanced.searchTypos, skips: settings.advanced.searchSkips, shuangpin: settings.advanced.shuangpin) else { return false }
             quality[w.id] = rank
             return true
@@ -199,6 +200,10 @@ enum WindowSearch {
             for w in candidates { if let target = SearchHabits.target(of: w), let score = learned[target] { habit[w.id] = score } }
         }
         candidates.sort { a, b in
+            if !tokens.isEmpty {
+                let first = a.launcher?.place ?? 1, second = b.launcher?.place ?? 1
+                if first != second { return first < second }
+            }
             // What the user keeps choosing for this search comes first, however well the others' names match.
             if !habit.isEmpty, habit[a.id] != habit[b.id] { return (habit[a.id] ?? 0) > (habit[b.id] ?? 0) }
             if !tokens.isEmpty && settings.advanced.searchRanking, let ar = quality[a.id], let br = quality[b.id], ar != br { return ar < br }
@@ -227,7 +232,8 @@ enum WindowSearch {
         // Things to open fill in after the windows; a short query should not flood the list with apps.
         var launchers = 0
         candidates = candidates.filter { candidate in
-            guard candidate.launcher != nil else { return true }
+            // Files come limited already, and a sum or a web search is one row each.
+            guard candidate.launcher?.place == 1 else { return true }
             launchers += 1
             return launchers <= WindowSearch.launcherLimit
         }
@@ -280,7 +286,7 @@ struct SearchHabits: Codable, Equatable {
     }
     /// What a choice is remembered by. Windows, tabs and apps to open count for their app, which outlives a restart.
     static func target(of window: WindowDescriptor) -> String? {
-        if window.launcher == .setting || window.menuBarItem { return window.id }
+        if window.launcher == .setting || window.launcher == .command || window.menuBarItem { return window.id }
         return window.bundleID.isEmpty ? nil : "app:\(window.bundleID)"
     }
     var count: Int { queries.count }
@@ -330,6 +336,157 @@ enum MatchKind: Int {
         case .typo: return "拼写容错"
         case .skipped: return "跳字匹配"
         }
+    }
+}
+
+/// A sum typed into the search. Written out here rather than left to NSExpression, which raises an exception on bad
+/// input and can call methods by name: everything typed into a search has to be safe to try.
+enum Calculator {
+    private enum Token: Equatable { case number(Double), symbol(Character), name(String) }
+    private static let functions: [String: (Double) -> Double] = [
+        "sqrt": { $0.squareRoot() }, "abs": { Swift.abs($0) }, "sin": { sin($0) }, "cos": { cos($0) }, "tan": { tan($0) },
+        "ln": { log($0) }, "log": { log10($0) }, "round": { $0.rounded() }, "floor": { $0.rounded(.down) }, "ceil": { $0.rounded(.up) },
+    ]
+    static let longest = 200
+    private static let deepest = 40
+
+    private static func tokens(_ text: String) -> [Token]? {
+        var result: [Token] = []
+        let characters = Array(WindowSearch.normalized(text))
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if character.isWhitespace { index += 1; continue }
+            if character.isNumber || character == "." {
+                var end = index
+                while end < characters.count, characters[end].isASCII, characters[end].isNumber || characters[end] == "." { end += 1 }
+                let word = String(characters[index..<end])
+                // 2024-01-01 and 007 are not numbers anyone adds up, and 1.2.3 is not a number at all.
+                guard word.first != "0" || word == "0" || word.hasPrefix("0."), let value = Double(word) else { return nil }
+                result.append(.number(value)); index = end; continue
+            }
+            if character.isLetter, character.isASCII {
+                var end = index
+                while end < characters.count, characters[end].isLetter, characters[end].isASCII { end += 1 }
+                result.append(.name(String(characters[index..<end]))); index = end; continue
+            }
+            switch character {
+            case "+", "-", "*", "/", "%", "^", "(", ")": result.append(.symbol(character))
+            case "×": result.append(.symbol("*"))
+            case "÷": result.append(.symbol("/"))
+            case "−": result.append(.symbol("-"))
+            case "π": result.append(.name("pi"))
+            default: return nil
+            }
+            index += 1
+        }
+        return result
+    }
+
+    private struct Parser {
+        let tokens: [Token]
+        var position = 0
+        var depth = 0
+        /// A lone number is not a sum: only something worked out makes this a result worth showing.
+        var worked = false
+        init(_ tokens: [Token]) { self.tokens = tokens }
+        var next: Token? { position < tokens.count ? tokens[position] : nil }
+        mutating func take(_ symbol: Character) -> Bool {
+            guard next == .symbol(symbol) else { return false }
+            position += 1
+            return true
+        }
+        mutating func sum() -> Double? {
+            guard var value = product() else { return nil }
+            while true {
+                if take("+") { guard let other = product() else { return nil }; value += other; worked = true }
+                else if take("-") { guard let other = product() else { return nil }; value -= other; worked = true }
+                else { return value }
+            }
+        }
+        mutating func product() -> Double? {
+            guard var value = signed() else { return nil }
+            while true {
+                if take("*") { guard let other = signed() else { return nil }; value *= other; worked = true }
+                else if take("/") { guard let other = signed() else { return nil }; value /= other; worked = true }
+                else if take("%") { guard let other = signed() else { return nil }; value = fmod(value, other); worked = true }
+                else if next == .name("x") {
+                    // 3x4, as it is often typed.
+                    position += 1
+                    guard let other = signed() else { return nil }
+                    value *= other; worked = true
+                } else { return value }
+            }
+        }
+        mutating func signed() -> Double? {
+            depth += 1; defer { depth -= 1 }
+            guard depth <= Calculator.deepest else { return nil }
+            if take("-") { return signed().map { -$0 } }
+            if take("+") { return signed() }
+            guard let base = percent() else { return nil }
+            guard takePower() else { return base }
+            guard let power = signed() else { return nil }
+            worked = true
+            return pow(base, power)
+        }
+        /// ^ or **.
+        private mutating func takePower() -> Bool {
+            if take("^") { return true }
+            guard next == .symbol("*"), position + 1 < tokens.count, tokens[position + 1] == .symbol("*") else { return false }
+            position += 2
+            return true
+        }
+        /// 50% is a half, also in 50%+1. A value straight after it means the remainder instead: 10 % 3.
+        mutating func percent() -> Double? {
+            guard var value = primary() else { return nil }
+            while next == .symbol("%") {
+                let after = position + 1 < tokens.count ? tokens[position + 1] : nil
+                switch after {
+                case .number?, .name?, .symbol("(")?: return value
+                default: position += 1; value /= 100; worked = true
+                }
+            }
+            return value
+        }
+        mutating func primary() -> Double? {
+            guard let token = next else { return nil }
+            switch token {
+            case .number(let value):
+                position += 1
+                return value
+            case .symbol("("):
+                position += 1
+                depth += 1; defer { depth -= 1 }
+                guard depth <= Calculator.deepest, let value = sum(), take(")") else { return nil }
+                return value
+            case .name("pi"):
+                position += 1
+                return Double.pi
+            case .name(let name):
+                guard let function = Calculator.functions[name] else { return nil }
+                position += 1
+                depth += 1; defer { depth -= 1 }
+                guard depth <= Calculator.deepest, take("("), let value = sum(), take(")") else { return nil }
+                worked = true
+                return function(value)
+            default:
+                return nil
+            }
+        }
+    }
+
+    /// The answer, or nil when this is not a sum that works out.
+    static func evaluate(_ text: String) -> Double? {
+        guard text.count <= longest, let tokens = tokens(text), !tokens.isEmpty else { return nil }
+        var parser = Parser(tokens)
+        guard let value = parser.sum(), parser.position == tokens.count, parser.worked, value.isFinite else { return nil }
+        return value
+    }
+    /// Whole numbers in full, the rest without the noise of binary fractions: 0.1 + 0.2 is 0.3.
+    static func format(_ value: Double) -> String {
+        if value == 0 { return "0" }
+        if value == value.rounded(), Swift.abs(value) < 1e15 { return String(Int64(value)) }
+        return String(format: "%.12g", value)
     }
 }
 

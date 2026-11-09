@@ -280,7 +280,122 @@ struct CoreTests {
         verifyDockPreviewExtras()
         verifyChineseSearch()
         verifyCrashRestart()
+        verifyStartMenu()
         print("\(passed) checks passed")
+    }
+    static func verifyStartMenu() {
+        // A sum.
+        func sum(_ text: String) -> String? { Calculator.evaluate(text).map(Calculator.format) }
+        let sums: [(String, String)] = [
+            ("1+2*3", "7"), ("(1+2)*3", "9"), ("10/4", "2.5"), ("7-10", "-3"),
+            ("2^10", "1024"), ("2**10", "1024"), ("2^3^2", "512"), ("-2^2", "-4"), ("2^-1", "0.5"), ("2*3**2", "18"),
+            ("10%3", "1"), ("10 % 3", "1"), ("50%", "0.5"), ("50%+1", "1.5"), ("200*15%", "30"), ("200+50%*2", "201"),
+            ("sqrt(16)+1", "5"), ("abs(-3)+1", "4"), ("round(2.6)", "3"), ("log(100)", "2"), ("floor(2.9)*2", "4"), ("ceil(2.1)", "3"),
+            ("1 + 2", "3"), ("３＋４", "7"), ("3×4", "12"), ("8÷2", "4"), ("（1+2）*2", "6"), ("3x4", "12"), ("3X4", "12"), ("5−2", "3"), ("1.5+.5", "2"),
+            ("0.1+0.2", "0.3"), ("1/3", "0.333333333333"), ("10^20", "1e+20"), ("1-1", "0"), ("-1+1", "0"), ("0*-1", "0"),
+        ]
+        for (text, answer) in sums { check(sum(text) == answer, "算式 \(text) = \(answer)") }
+        check(sum("pi*2")?.hasPrefix("6.28318530") == true, "圆周率")
+        check(sum("π*2")?.hasPrefix("6.28318530") == true, "圆周率可以写成 π")
+        let notSums = ["123", "-5", "(5)", "pi", "abc", "", " ", "1+", "+", "*2", "(1+2", "1+2)", "2(3)", "2pi", "1 2", "sqrt", "sqrt(", "sqrt 4", "nosuch(1)", "x", "3x", "%",
+                       "2024-01-01", "1.2.3", "007+1", "7-zip", "v1.2", "a+b", "微信+1", "一+一", "1/0", "0/0", "sqrt(-1)", "2^99999", "5%0"]
+        for text in notSums { check(sum(text) == nil, "不显示计算结果：\(text)") }
+        let deep = String(repeating: "(", count: 90) + "1+1" + String(repeating: ")", count: 90)
+        check(sum(deep) == nil, "括号嵌套太深时不计算，也不会崩溃")
+        check(sum(String(repeating: "-", count: 150) + "1+1") == nil, "负号太多时不计算，也不会崩溃")
+        check(sum(String(repeating: "1+", count: 400) + "1") == nil, "太长时不计算")
+        check(sum(String(repeating: "(", count: 10) + "1+1" + String(repeating: ")", count: 10)) == "2", "普通的嵌套可以计算")
+
+        // A web search and a web address.
+        check(WebSearchEngine.baidu.url(for: "微信")?.absoluteString == "https://www.baidu.com/s?wd=%E5%BE%AE%E4%BF%A1", "百度搜索的地址")
+        check(WebSearchEngine.bing.url(for: "a b")?.absoluteString == "https://www.bing.com/search?q=a%20b", "必应搜索的地址")
+        check(WebSearchEngine.google.url(for: "c++")?.absoluteString == "https://www.google.com/search?q=c%2B%2B", "加号不会变成空格")
+        check(WebSearchEngine.duckDuckGo.url(for: "a&b=c#d")?.absoluteString == "https://duckduckgo.com/?q=a%26b%3Dc%23d", "特殊字符不会改变地址的结构")
+        check(WebSearchEngine.allCases.allSatisfy { $0.url(for: "x")?.scheme == "https" && !$0.label.isEmpty }, "每个搜索引擎都用 https")
+        let addresses: [(String, String)] = [
+            ("github.com", "https://github.com"), (" docs.python.org/3/ ", "https://docs.python.org/3/"), ("www.example.xyz", "https://www.example.xyz"), ("http://x.org/a?b=1", "http://x.org/a?b=1"),
+        ]
+        for (text, address) in addresses { check(WebAddress.url(from: text)?.absoluteString == address, "网址：\(text)") }
+        check(WebAddress.url(from: "HTTPS://x.dev")?.host == "x.dev", "协议的大小写不影响判断")
+        for text in ["javascript:alert(1)", "file:///etc/passwd", "ftp://x.org", "mailto:a@b.com", "x-apple.systempreferences:com", "chrome://settings", "localhost:8080", "http://", "https:// x.org"] {
+            check(WebAddress.url(from: text) == nil, "只打开 http 和 https：\(text)")
+        }
+        for text in ["report.pdf", "main.swift", "com.apple.mail", "hello world", "微信", "1.5", "a..com", ".com", "com", "a@b.com", ""] {
+            check(WebAddress.url(from: text) == nil, "不算网址：\(text)")
+        }
+
+        // Commands.
+        let commands = SystemCommand.allCases
+        check(Set(commands.map(\.title)).count == commands.count, "系统命令的名称不重复")
+        check(commands.allSatisfy { !$0.english.isEmpty && !$0.keywords.isEmpty && !$0.symbol.isEmpty }, "每个系统命令都有英文名、搜索词和图标")
+        check(commands.allSatisfy { $0.program.path.hasPrefix("/usr/bin/") }, "系统命令用系统自带的绝对路径运行")
+        check(commands.allSatisfy { $0.asksFirst == $0.title.hasSuffix("…") }, "会先确认的命令名称都带省略号")
+        for command in [SystemCommand.restart, .shutDown, .logOut, .emptyTrash] { check(command.asksFirst, "结束会话或删除文件前先确认：\(command.title)") }
+        check(SystemCommand.restart.program.arguments.last?.contains("aevtrrst") == true, "重新启动用系统的确认对话框")
+        check(SystemCommand.shutDown.program.arguments.last?.contains("aevtrsdn") == true, "关机用系统的确认对话框")
+        check(SystemCommand.logOut.program.arguments.last?.contains("aevtlogo") == true, "退出登录用系统的确认对话框")
+        for event in ["aevtrest", "aevtshut", "aevtrlgo"] {
+            check(!commands.contains { $0.program.arguments.contains { $0.contains(event) } }, "不使用不经确认就执行的事件：\(event)")
+        }
+
+        // Files.
+        let home = "/Users/me"
+        check(FileSearchPolicy.tokens("报告 2026") == ["报告", "2026"], "按空格分开查找")
+        for text in ["a", "", "  ", "* ?"] { check(FileSearchPolicy.tokens(text).isEmpty, "至少两个字才查文件：\(text)") }
+        check(FileSearchPolicy.tokens("a*b?c") == ["abc"], "通配符不进入查询")
+        check(FileSearchPolicy.tokens("\"x'y\\z") == ["xyz"], "引号和反斜杠不进入查询")
+        check(FileSearchPolicy.tokens("a b c d e f g").count == 5, "关键词数量有上限")
+        for path in ["/Users/me/Documents/报告.pdf", "/Users/me/a.txt"] { check(FileSearchPolicy.keeps(path: path, home: home), "主目录下的文件：\(path)") }
+        for path in ["/Users/me/Library/Caches/a.txt", "/Users/me/.ssh/config", "/Users/me/x/.git/a", "/Users/me/Applications/A.app", "/Users/me/A.app/Contents/x.txt", "/Users/other/a.txt", "/Users/melissa/a.txt", "/tmp/a.txt"] {
+            check(!FileSearchPolicy.keeps(path: path, home: home), "不列这个文件：\(path)")
+        }
+        check(FileSearchPolicy.kept((0..<20).map { "/Users/me/\($0).txt" }, home: home).count == FileSearchPolicy.limit, "文件数量有上限")
+        check(FileSearchPolicy.place(of: "/Users/me/Documents/a.txt", home: home) == "~/Documents", "子文件夹里的文件")
+        check(FileSearchPolicy.place(of: "/Users/me/a.txt", home: home) == "~", "主目录里的文件")
+        check(FileSearchPolicy.place(of: "/tmp/a.txt", home: home) == "/tmp", "其他位置的文件")
+
+        // Together in the results.
+        func result(_ id: String, title: String, kind: LaunchKind?, bundle: String = "", pid: Int32 = 0) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: nil, pid: pid, appName: title, bundleID: bundle, title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            d.launcher = kind
+            return d
+        }
+        func list(_ items: [WindowDescriptor], _ text: String) -> [String] {
+            let settings = UserSettings.defaults
+            return WindowSearch.filtered(items, settings: settings, profile: settings.shortcuts[0], frontPID: nil, displayID: nil, query: text).map(\.id)
+        }
+        let mixed = [result("web", title: "用百度搜索", kind: .web), result("file", title: "wx 记录.txt", kind: .file), result("window", title: "wx 窗口", kind: nil, bundle: "w", pid: 5),
+                     result("app", title: "wx 工具", kind: .app, bundle: "t"), result("command", title: "wx 命令", kind: .command, bundle: "lockScreen"), result("calc", title: "= 7", kind: .calculation)]
+        check(list(mixed, "wx") == ["calc", "window", "app", "command", "file", "web"], "算式最前，文件在窗口和应用之后，网页搜索最后")
+        check(list(mixed, "") == ["window"], "没有输入时只列窗口")
+        check(list([result("web", title: "用百度搜索", kind: .web)], "完全不相关") == ["web"], "网页搜索不要求匹配输入")
+        check(list([result("file", title: "报告.txt", kind: .file)], "完全不相关").isEmpty, "输入变化后，不匹配的旧文件结果不再显示")
+        let many = (0..<20).map { result("a\($0)", title: "wx\($0)", kind: .app, bundle: "a\($0)") } + (0..<3).map { result("f\($0)", title: "wx\($0).txt", kind: .file) }
+            + [result("web", title: "搜索", kind: .web), result("calc", title: "= 1", kind: .calculation)]
+        let listed = list(many, "wx")
+        check(listed.filter { $0.hasPrefix("a") }.count == WindowSearch.launcherLimit, "应用的数量仍有上限")
+        check(listed.filter { $0.hasPrefix("f") }.count == 3, "文件不占应用的名额")
+        check(listed.contains("web") && listed.first == "calc", "算式和网页搜索不占应用的名额")
+        for kind in [LaunchKind.file, .calculation, .web] { check(SearchHabits.target(of: result("x", title: "x", kind: kind)) == nil, "不进入搜索习惯：\(kind)") }
+        check(SearchHabits.target(of: result("launch:command:sleep", title: "睡眠", kind: .command, bundle: "sleep")) == "launch:command:sleep", "系统命令可以进入搜索习惯")
+        var command = result("c", title: "锁定屏幕", kind: .command, bundle: "lockScreen")
+        command.subtitle = SystemCommand.lockScreen.keywords
+        for query in ["锁屏", "suoping", "suodingpingmu", "sdpm"] { check(WindowSearch.matches(command, query: query), "系统命令可以用别名和拼音找到：\(query)") }
+        for kind in LaunchKind.allCases { check(!kind.label.isEmpty && !kind.symbol.isEmpty && !kind.hint.isEmpty && !kind.action.isEmpty, "每种结果都有说明：\(kind)") }
+        check(LaunchKind.calculation.action == "复制" && LaunchKind.web.action == "打开", "回车的动作")
+        check(LaunchKind.web.madeFromQuery && LaunchKind.calculation.madeFromQuery && !LaunchKind.file.madeFromQuery, "只有算式和网页搜索不需要匹配输入")
+
+        // Settings.
+        let standard = AdvancedSettings()
+        check(standard.searchCommands && standard.searchFiles && standard.searchCalculator && standard.searchWeb, "开始菜单的功能默认开启")
+        check(standard.webEngine == .baidu, "默认的搜索引擎")
+        var stored = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(standard)) as! [String: Any]
+        for key in ["searchCommands", "searchFiles", "searchCalculator", "searchWeb", "webEngine"] { stored.removeValue(forKey: key) }
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: stored)) == standard, "旧设置没有这几项时采用默认值")
+        var chosen = standard
+        chosen.searchWeb = false; chosen.searchFiles = false; chosen.webEngine = .google
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(chosen)) == chosen, "开始菜单的设置保存后不变")
+        for word in ["计算器", "锁屏", "网页搜索", "聚焦", "必应"] { check(SettingSearchIndex.results(word).first?.section == 1, "设置搜索可以找到新选项：\(word)") }
     }
     static func verifyCrashRestart() {
         let p = CrashRestartPolicy.self

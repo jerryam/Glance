@@ -265,6 +265,53 @@ struct WindowShortcutSettings: Codable, Equatable {
     }
 }
 
+/// Where a web search goes. Choosing the row hands the address to the default browser; 一瞥 itself sends nothing.
+enum WebSearchEngine: String, Codable, CaseIterable, Identifiable {
+    case baidu, bing, google, duckDuckGo
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .baidu: return "百度"
+        case .bing: return "必应"
+        case .google: return "Google"
+        case .duckDuckGo: return "DuckDuckGo"
+        }
+    }
+    /// Everything but these is encoded: left as it is, + reads as a space and & or # would change the address.
+    private static let plain = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+    func url(for query: String) -> URL? {
+        guard let text = query.addingPercentEncoding(withAllowedCharacters: Self.plain) else { return nil }
+        switch self {
+        case .baidu: return URL(string: "https://www.baidu.com/s?wd=" + text)
+        case .bing: return URL(string: "https://www.bing.com/search?q=" + text)
+        case .google: return URL(string: "https://www.google.com/search?q=" + text)
+        case .duckDuckGo: return URL(string: "https://duckduckgo.com/?q=" + text)
+        }
+    }
+}
+
+/// A web address typed into the search. Only http and https: a search result must never run a script or read a file.
+enum WebAddress {
+    private static let endings: Set<String> = ["com", "cn", "net", "org", "io", "edu", "gov"]
+    static func url(from text: String) -> URL? {
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty, typed.count <= 2000, !typed.contains(where: { $0.isWhitespace }) else { return nil }
+        let lower = typed.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+            guard let url = URL(string: typed), url.host?.isEmpty == false else { return nil }
+            return url
+        }
+        guard !typed.contains(":") else { return nil }
+        let host = String(typed.split(separator: "/", omittingEmptySubsequences: false).first ?? "").lowercased()
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        // main.swift and report.pdf are names of files, and com.apple.mail is an identifier, not a place on the web.
+        guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") } }),
+              parts[0] == "www" || endings.contains(parts[parts.count - 1]) else { return nil }
+        guard let url = URL(string: "https://\(typed)"), url.host?.isEmpty == false else { return nil }
+        return url
+    }
+}
+
 /// Double pinyin layouts the search understands.
 enum ShuangpinScheme: String, Codable, CaseIterable, Identifiable {
     case off, xiaohe, ziranma, microsoft
@@ -287,6 +334,11 @@ struct AdvancedSettings: Codable, Equatable {
     var searchLearning = true
     var searchSkips = true
     var shuangpin = ShuangpinScheme.off
+    var searchCommands = true
+    var searchFiles = true
+    var searchCalculator = true
+    var searchWeb = true
+    var webEngine = WebSearchEngine.baidu
     var showSearchHint = true
     var shiftSelectsPrevious = true
     var voiceOverKeepsOpen = true
@@ -325,6 +377,7 @@ struct AdvancedSettings: Codable, Equatable {
     init() {}
     private enum CodingKeys: String, CodingKey {
         case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning, searchSkips, shuangpin
+        case searchCommands, searchFiles, searchCalculator, searchWeb, webEngine
         case showSearchHint, shiftSelectsPrevious, voiceOverKeepsOpen, gestureAvoidsSystem, independentGesture
         case focusMethod, commandLineEnabled, dockBadges, restartAfterCrash, browserTabs, searchApps, searchSettingsPages, numberHints
         case titleDisplay, titleCut, panelScreen, followCursor, gesture, gestureProfile, haptics, arrowKeys, vimKeys
@@ -341,6 +394,11 @@ struct AdvancedSettings: Codable, Equatable {
         searchLearning = try c.decodeIfPresent(Bool.self, forKey: .searchLearning) ?? true
         searchSkips = try c.decodeIfPresent(Bool.self, forKey: .searchSkips) ?? true
         shuangpin = try c.decodeIfPresent(ShuangpinScheme.self, forKey: .shuangpin) ?? .off
+        searchCommands = try c.decodeIfPresent(Bool.self, forKey: .searchCommands) ?? true
+        searchFiles = try c.decodeIfPresent(Bool.self, forKey: .searchFiles) ?? true
+        searchCalculator = try c.decodeIfPresent(Bool.self, forKey: .searchCalculator) ?? true
+        searchWeb = try c.decodeIfPresent(Bool.self, forKey: .searchWeb) ?? true
+        webEngine = try c.decodeIfPresent(WebSearchEngine.self, forKey: .webEngine) ?? .baidu
         showSearchHint = try c.decodeIfPresent(Bool.self, forKey: .showSearchHint) ?? true
         shiftSelectsPrevious = try c.decodeIfPresent(Bool.self, forKey: .shiftSelectsPrevious) ?? true
         voiceOverKeepsOpen = try c.decodeIfPresent(Bool.self, forKey: .voiceOverKeepsOpen) ?? true

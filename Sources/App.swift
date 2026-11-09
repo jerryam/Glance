@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusMenu = NSMenu()
     let menuBar = MenuBarController()
     let launcher = LaunchCatalog()
+    let fileSearch = FileSearch()
     let dockPreview = DockPreviewController()
     let frontFullscreen = FrontFullscreenWatch()
     var browserTabs = BrowserTabCache<WindowHandle>()
@@ -163,6 +164,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             else { self?.menuBar.toggle(all: slot == 1) }
         }
         launcher.onUpdate = { [weak self] in self?.updateExtraItems() }
+        fileSearch.onUpdate = { [weak self] in self?.updateExtraItems() }
+        state.queryItems = { [weak self] query in self?.queryItems(for: query) ?? [] }
+        state.onQueryChange = { [weak self] query in self?.queryChanged(query) }
+        state.onRevealFile = { [weak self] path in
+            self?.dismiss()
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        }
         launcher.refreshIfNeeded()
         setupDockPreview()
         menuBar.onRevealChange = { [weak self] in self?.updateStatusButton() }
@@ -944,9 +952,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if selected.descriptor.launcher != nil {
-            let id = selected.id
             dismiss()
-            if !launcher.open(id) { NSSound.beep() }
+            if !openLauncherItem(selected.descriptor) { NSSound.beep() }
             return
         }
         if selected.descriptor.settingsWindow {
@@ -1046,6 +1053,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else { panel.orderOut(nil) }
         previewPanel?.orderOut(nil); capture.cancel(); engine.suspendTracking = false
         state.zoomImage = nil; state.extraItems = []; state.ownItems = []; state.expandedApp = nil; state.dropTargetID = nil
+        fileSearch.cancel()
         returnSettings(cancelled: cancelled)
         updateHotkeyGate()
         syncActivityTimers()

@@ -493,6 +493,18 @@ struct SettingsView: View {
                 SettingsToggle("搜索时包含未打开的应用", isOn: $model.draft.advanced.searchApps)
                 SettingsToggle("搜索时包含系统设置页面", isOn: $model.draft.advanced.searchSettingsPages)
                 SettingsNote("像 Windows 的开始菜单一样：输入应用或设置的名称（中文、拼音或英文都可以），回车即可打开，例如“wx”打开微信、“蓝牙”打开蓝牙设置。匹配程度相同时排在已打开的窗口后面，每次最多列出 \(WindowSearch.launcherLimit) 项。")
+                Group {
+                    SettingsToggle("搜索时包含系统命令", isOn: $model.draft.advanced.searchCommands)
+                    SettingsToggle("搜索时查找文件", isOn: $model.draft.advanced.searchFiles)
+                    SettingsToggle("搜索时计算算式", isOn: $model.draft.advanced.searchCalculator)
+                    SettingsToggle("在结果最后提供网页搜索", isOn: $model.draft.advanced.searchWeb)
+                    if model.draft.advanced.searchWeb {
+                        SettingsChoice("搜索引擎", selection: $model.draft.advanced.webEngine) {
+                            ForEach(WebSearchEngine.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    SettingsNote("系统命令：锁定屏幕、睡眠、重新启动等，重启、关机、退出登录和清空废纸篓都会先确认。文件来自聚焦搜索，只查你主目录下的文件名，不记录。算式如 1+2*3，回车复制结果。网页搜索只在你选中这一行并回车时才交给默认浏览器，一瞥自己不联网；如果搜索没有其他结果，这一行就是唯一的结果，回车会打开它。")
+                }
             }
             SettingsGroup("选择窗口") {
                 SettingsToggle("按 Shift 单独反向选择", isOn: $model.draft.advanced.shiftSelectsPrevious)
