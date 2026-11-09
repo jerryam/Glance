@@ -67,7 +67,7 @@ final class SwitcherState: ObservableObject {
     /// How the selected result matched, for the pill beside the search field.
     var matchLabel: String? {
         guard searchVisible, !query.isEmpty, let selected else { return nil }
-        return WindowSearch.matchKind(selected.descriptor, query: query, allowTypos: settings.advanced.searchTypos)?.label
+        return WindowSearch.matchKind(selected.descriptor, query: query, allowTypos: settings.advanced.searchTypos, skips: settings.advanced.searchSkips, shuangpin: settings.advanced.shuangpin)?.label
     }
     func isAtEnd(_ d: WindowDescriptor) -> Bool { WindowSearch.isAtEnd(d, settings: settings, profile: profile) }
     /// In the list style, a divider separates windows placed at the end (minimized, no window …).
@@ -253,11 +253,11 @@ extension TitleCut {
 }
 
 /// Text with the characters a search matched marked in amber.
-private func highlighted(_ text: String, query: String) -> AttributedString {
+private func highlighted(_ text: String, query: String, advanced: AdvancedSettings) -> AttributedString {
     var result = AttributedString(text)
     guard !query.isEmpty else { return result }
     let characters = result.characters
-    for range in WindowSearch.highlights(in: text, query: query) where range.upperBound <= characters.count {
+    for range in WindowSearch.highlights(in: text, query: query, skips: advanced.searchSkips, shuangpin: advanced.shuangpin) where range.upperBound <= characters.count {
         let start = characters.index(characters.startIndex, offsetBy: range.lowerBound)
         let end = characters.index(characters.startIndex, offsetBy: range.upperBound)
         result[start..<end][AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] = GlanceDesign.highlight
@@ -993,12 +993,12 @@ private struct SearchRow: View {
             HStack(spacing: 12) {
                 BadgedIcon(icon: item.icon, size: 30, badge: state.badges[item.descriptor.pid])
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(highlighted(item.descriptor.displayTitle, query: state.query))
+                    Text(highlighted(item.descriptor.displayTitle, query: state.query, advanced: state.settings.advanced))
                         .font(.system(size: 14, weight: selected ? .bold : .semibold)).foregroundStyle(GlanceDesign.ink).lineLimit(1)
                     HStack(spacing: 0) {
                         // Something to open without an English name would repeat its title here.
                         let showsApp = !(item.descriptor.launcher != nil && item.descriptor.appName == item.descriptor.title)
-                        if showsApp { Text(highlighted(item.descriptor.appName, query: state.query)) }
+                        if showsApp { Text(highlighted(item.descriptor.appName, query: state.query, advanced: state.settings.advanced)) }
                         let rest = state.details(for: item.descriptor, includeApp: false)
                         if !rest.isEmpty { Text((showsApp ? " · " : "") + rest.joined(separator: " · ")) }
                     }.font(.system(size: 12)).foregroundStyle(GlanceDesign.secondary).lineLimit(1)

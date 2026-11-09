@@ -265,12 +265,28 @@ struct WindowShortcutSettings: Codable, Equatable {
     }
 }
 
+/// Double pinyin layouts the search understands.
+enum ShuangpinScheme: String, Codable, CaseIterable, Identifiable {
+    case off, xiaohe, ziranma, microsoft
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "不使用"
+        case .xiaohe: return "小鹤"
+        case .ziranma: return "自然码"
+        case .microsoft: return "微软 / 搜狗"
+        }
+    }
+}
+
 struct AdvancedSettings: Codable, Equatable {
     var preferencesRevision = 2
     var inputMode: PanelInputMode = .search
     var searchRanking = true
     var searchTypos = true
     var searchLearning = true
+    var searchSkips = true
+    var shuangpin = ShuangpinScheme.off
     var showSearchHint = true
     var shiftSelectsPrevious = true
     var voiceOverKeepsOpen = true
@@ -307,7 +323,7 @@ struct AdvancedSettings: Codable, Equatable {
     var exceptions = AppException.defaults
     init() {}
     private enum CodingKeys: String, CodingKey {
-        case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning
+        case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning, searchSkips, shuangpin
         case showSearchHint, shiftSelectsPrevious, voiceOverKeepsOpen, gestureAvoidsSystem, independentGesture
         case focusMethod, commandLineEnabled, dockBadges, browserTabs, searchApps, searchSettingsPages, numberHints
         case titleDisplay, titleCut, panelScreen, followCursor, gesture, gestureProfile, haptics, arrowKeys, vimKeys
@@ -322,6 +338,8 @@ struct AdvancedSettings: Codable, Equatable {
         searchRanking = try c.decodeIfPresent(Bool.self, forKey: .searchRanking) ?? true
         searchTypos = try c.decodeIfPresent(Bool.self, forKey: .searchTypos) ?? true
         searchLearning = try c.decodeIfPresent(Bool.self, forKey: .searchLearning) ?? true
+        searchSkips = try c.decodeIfPresent(Bool.self, forKey: .searchSkips) ?? true
+        shuangpin = try c.decodeIfPresent(ShuangpinScheme.self, forKey: .shuangpin) ?? .off
         showSearchHint = try c.decodeIfPresent(Bool.self, forKey: .showSearchHint) ?? true
         shiftSelectsPrevious = try c.decodeIfPresent(Bool.self, forKey: .shiftSelectsPrevious) ?? true
         voiceOverKeepsOpen = try c.decodeIfPresent(Bool.self, forKey: .voiceOverKeepsOpen) ?? true

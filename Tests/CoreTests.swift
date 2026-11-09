@@ -278,7 +278,98 @@ struct CoreTests {
         verifyBrowserScripts()
         verifySearchHabits()
         verifyDockPreviewExtras()
+        verifyChineseSearch()
         print("\(passed) checks passed")
+    }
+    static func verifyChineseSearch() {
+        func window(_ title: String, app: String = "App") -> WindowDescriptor {
+            WindowDescriptor(id: title, windowID: 1, pid: 1, appName: app, bundleID: "org.app", title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        }
+        func finds(_ title: String, _ query: String) -> Bool { WindowSearch.matches(window(title), query: query) }
+
+        // Characters with more than one reading.
+        check(finds("重庆", "chongqing") && finds("重庆", "zhongqing"), "多音字：重庆的两个读音都能找到")
+        check(finds("重庆", "cq") && finds("重庆", "zq"), "多音字的每个读音都能用首字母找到")
+        check(finds("中国银行", "yinhang") && finds("中国银行", "zhongguoyinhang") && finds("银行", "yh"), "多音字：银行")
+        check(finds("音乐", "yinyue") && finds("音乐", "yinle"), "多音字：音乐")
+        check(finds("校长", "xiaozhang") && finds("长城", "changcheng"), "多音字：长")
+        check(finds("文件夹", "wenjianjia") && finds("便签", "bianqian") && finds("屏幕", "pingmu"), "多音字：常见的名称")
+        check(WindowSearch.matchKind(window("重庆"), query: "chongqing") == .pinyin, "多音字匹配显示为拼音")
+        check(WindowSearch.highlights(in: "重庆银行", query: "yinhang") == [2..<4], "多音字匹配高亮对应的汉字")
+        check(PinyinReadings.syllables(of: "乐").contains("yue") && PinyinReadings.syllables(of: "乐").contains("le"), "读音表合并系统读音")
+        check(Set(PinyinReadings.syllables(of: "重")).count == PinyinReadings.syllables(of: "重").count, "读音不重复")
+
+        // ü typed as v or u.
+        check(finds("绿色", "lvse") && finds("绿色", "luse"), "ü 可以输入 v 或 u")
+        check(finds("女生", "nvsheng") && finds("女生", "nusheng"), "系统读音里的 ü 也可以输入 v")
+        check(finds("旅行", "lvxing") && finds("率", "shuai") && finds("率", "lv"), "ü 和多音字可以同时出现")
+
+        // Mixed typing.
+        check(finds("微信", "微xin") && finds("微信", "wei信"), "汉字和全拼混合输入")
+        check(finds("微信", "wxin") && finds("微信", "weix") && finds("微信", "微x"), "全拼和首字母混合输入")
+        check(finds("收件箱", "收jian箱") && finds("收件箱", "shoujx") && finds("收件箱", "sjxiang"), "三个字也能混合输入")
+        check(finds("企业微信", "微xin"), "混合输入可以从名称中间开始")
+        check(!finds("微信", "微xun") && !finds("微信", "微a") && !finds("微信", "信微"), "混合输入仍然要求每个字都对上，顺序也不能变")
+        check(WindowSearch.matchKind(window("微信"), query: "微xin") == .pinyin, "混合输入显示为拼音")
+        check(WindowSearch.highlights(in: "微信", query: "微xin") == [0..<2] && WindowSearch.highlights(in: "企业微信", query: "wxin") == [2..<4], "混合输入高亮对应的汉字")
+        check(WindowSearch.matches(window("工作", app: "微信"), query: "wxin"), "应用名也能混合输入")
+
+        // Ranking.
+        func order(_ windows: [WindowDescriptor], _ query: String, _ advanced: (inout AdvancedSettings) -> Void = { _ in }) -> [String] {
+            var settings = UserSettings.defaults
+            advanced(&settings.advanced)
+            return WindowSearch.filtered(windows, settings: settings, profile: settings.shortcuts[0], frontPID: nil, displayID: nil, query: query).map(\.id)
+        }
+        check(order([window("重庆"), window("chongqing notes")], "chongqing") == ["chongqing notes", "重庆"], "名称直接匹配排在多音字前面")
+        check(order([window("微小信息"), window("微信")], "微xin").first == "微信", "混合输入连续匹配")
+        check(order([window("Chrome 帮助"), window("Chrome")], "chrm").count == 2 && order([window("Chrome"), window("charm")], "chrm") == ["charm", "Chrome"], "拼写容错排在跳字匹配前面")
+
+        // Skipping characters.
+        check(finds("Chrome", "chrm") && finds("Safari", "sfri") && finds("Visual Studio Code", "vscode"), "跳字匹配：英文")
+        check(finds("文件管理器", "wjq") && finds("文件管理器", "wjglq") && finds("文件管理器", "文管q"), "跳字匹配：中文")
+        check(!finds("Chrome", "crm") && !finds("Safari", "sar"), "三个字母必须都是词的开头，否则太容易误中")
+        check(finds("PowerPoint Tools", "ppt"), "大小写分开的单词也算词的开头")
+        check(!finds("Safari", "afri"), "跳字匹配必须从词的开头开始")
+        check(!finds("Another long window title that goes on and on before here bcdefg", "abcd"), "相隔太远的字不算跳字匹配")
+        check(!WindowSearch.matches(window("Chrome"), query: "chrm", skips: false), "可以关闭跳字匹配")
+        check(WindowSearch.matchKind(window("Chrome"), query: "chrm") == .skipped && MatchKind.skipped.label == "跳字匹配", "跳字匹配有自己的说明")
+        check(WindowSearch.highlights(in: "Chrome", query: "chrm") == [0..<3, 4..<5], "跳字匹配高亮用到的字")
+        check(WindowSearch.highlights(in: "Chrome", query: "chrm", skips: false).isEmpty, "关闭跳字匹配后不高亮")
+        check(!finds(String(repeating: "a", count: 1000), "aaaaaaaaab") && !finds(String(repeating: "重", count: 1000), "chongzhongchongzhongx"), "很长且重复的标题也能很快判断")
+        check(finds(String(repeating: "x", count: 300) + "微信", "xxx") && !finds(String(repeating: "x", count: 300) + "微信", "微xin"), "超长标题只看前面一段")
+
+        // Double pinyin.
+        func codes(_ syllable: String, _ scheme: ShuangpinScheme) -> [String] { Shuangpin.codes(for: syllable, scheme: scheme) }
+        check(codes("wei", .xiaohe) == ["ww"] && codes("xin", .xiaohe) == ["xb"] && codes("shou", .xiaohe) == ["uz"] && codes("jian", .xiaohe) == ["jm"] && codes("xiang", .xiaohe) == ["xl"], "小鹤双拼的韵母")
+        check(codes("zhong", .xiaohe) == ["vs"] && codes("chuang", .xiaohe) == ["il"] && codes("shuai", .xiaohe) == ["uk"] && codes("ming", .xiaohe) == ["mk"], "小鹤双拼的声母")
+        check(codes("a", .xiaohe) == ["aa"] && codes("ang", .xiaohe) == ["ah"] && codes("eng", .xiaohe) == ["eg"] && codes("o", .xiaohe) == ["oo"], "小鹤双拼的零声母")
+        check(Set(codes("ai", .xiaohe)) == ["ad", "ai"] && Set(codes("ou", .xiaohe)) == ["oz", "ou"] && codes("er", .xiaohe) == ["er"], "小鹤双拼的两字母音节")
+        check(Set(codes("ju", .xiaohe)) == ["ju", "jv"] && codes("lv", .xiaohe) == ["lv"] && codes("lve", .xiaohe) == ["lt"] && codes("nue", .xiaohe) == ["nt"], "小鹤双拼的 ü")
+        check(codes("wei", .ziranma) == ["wz"] && codes("xin", .ziranma) == ["xn"] && codes("shou", .ziranma) == ["ub"] && codes("xiang", .ziranma) == ["xd"] && codes("ming", .ziranma) == ["my"], "自然码的韵母")
+        check(codes("dui", .ziranma) == ["dv"] && codes("hua", .ziranma) == ["hw"] && codes("hun", .ziranma) == ["hp"] && codes("ao", .ziranma).contains("ak"), "自然码的其他韵母")
+        check(codes("wei", .microsoft) == ["wz"] && codes("ming", .microsoft) == ["m;"] && codes("lv", .microsoft) == ["ly"] && Set(codes("lve", .microsoft)) == ["lt", "lv"], "微软双拼")
+        check(Set(codes("a", .microsoft)) == ["oa", "aa"] && Set(codes("er", .microsoft)) == ["or", "er"] && codes("ai", .microsoft).contains("ol"), "微软双拼的零声母")
+        check(codes("ng", .xiaohe).isEmpty && codes("", .xiaohe).isEmpty && codes("wei", .off).isEmpty, "没有对应按键的音节不产生编码")
+        check(!finds("微信", "wwxb"), "默认不把输入当作双拼")
+        check(WindowSearch.matches(window("微信"), query: "wwxb", shuangpin: .xiaohe) && WindowSearch.matches(window("微信"), query: "wzxn", shuangpin: .ziranma) && WindowSearch.matches(window("微信"), query: "wzxn", shuangpin: .microsoft), "三种双拼都能找到微信")
+        check(!WindowSearch.matches(window("微信"), query: "wzxn", shuangpin: .xiaohe), "只认选中的双拼方案")
+        check(WindowSearch.matches(window("收件箱"), query: "uzjmxl", shuangpin: .xiaohe) && WindowSearch.matches(window("中文"), query: "vswf", shuangpin: .xiaohe), "小鹤双拼能找到更长的名称")
+        check(WindowSearch.matches(window("微信"), query: "微xb", shuangpin: .xiaohe) && WindowSearch.matches(window("微信"), query: "weixin", shuangpin: .xiaohe), "选了双拼仍然可以用汉字和全拼")
+        check(WindowSearch.matches(window("重庆"), query: "isqk", shuangpin: .xiaohe) && WindowSearch.matches(window("重庆"), query: "vsqk", shuangpin: .xiaohe) && WindowSearch.matches(window("重庆"), query: "isqy", shuangpin: .ziranma), "多音字的每个读音都有双拼")
+        check(WindowSearch.highlights(in: "微信", query: "wwxb", shuangpin: .xiaohe) == [0..<2] && WindowSearch.highlights(in: "微信", query: "wwxb").isEmpty, "双拼高亮对应的汉字，同一段文字不受其他方案影响")
+        check(WindowSearch.matchKind(window("微信"), query: "wwxb", shuangpin: .xiaohe) == .pinyin, "双拼显示为拼音")
+
+        // Settings.
+        check(AdvancedSettings().searchSkips && AdvancedSettings().shuangpin == .off, "默认开启跳字匹配，不使用双拼")
+        var plain = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(AdvancedSettings())) as! [String: Any]
+        plain.removeValue(forKey: "searchSkips"); plain.removeValue(forKey: "shuangpin")
+        let old = try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: plain))
+        check(old.searchSkips && old.shuangpin == .off, "旧设置没有这两项时采用默认值")
+        var chosen = AdvancedSettings(); chosen.searchSkips = false; chosen.shuangpin = .ziranma
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(chosen)) == chosen, "搜索方式保存后不变")
+        check(order([window("微信")], "wwxb") == [] && order([window("微信")], "wwxb", { $0.shuangpin = .xiaohe }) == ["微信"], "选了双拼方案后搜索结果跟着变")
+        check(order([window("Chrome")], "chrm") == ["Chrome"] && order([window("Chrome")], "chrm", { $0.searchSkips = false }) == [], "关闭跳字匹配后搜索结果跟着变")
+        check(SettingSearchIndex.results("双拼").first?.section == 1 && SettingSearchIndex.results("跳字").first?.section == 1, "设置搜索可以找到新选项")
     }
     static func verifyDockPreviewExtras() {
         func window(_ id: String, minimized: Bool = false, hidden: Bool = false, here: Bool = true, frame: WindowRect? = WindowRect(x: 10, y: 20, width: 800, height: 600)) -> WindowDescriptor {

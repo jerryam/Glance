@@ -719,6 +719,7 @@ enum SettingSearchIndex {
         .init(1, "面板输入方式", "直接 搜索 传统 单键"), .init(1, "显示面板搜索提示", "search hint"),
         .init(1, "搜索优先显示名称直接匹配的窗口", "排序 匹配 拼音"),
         .init(1, "容忍英文或完整拼音的一处拼写错误", "容错 拼音 typo pinyin"),
+        .init(1, "允许跳过中间的字", "跳字 子序列 模糊 fuzzy subsequence 拼音"), .init(1, "双拼方案", "双拼 小鹤 自然码 微软 搜狗 shuangpin 拼音"),
         .init(1, "把常选的结果排到前面", "常用 习惯 学习 记住 搜索记录 清除 排序"),
         .init(1, "搜索时包含浏览器标签页","Safari Chrome Edge Arc Opera 标签 tab 浏览器 网页 网址"),
         .init(1, "搜索时包含未打开的应用", "启动 打开 开始菜单 start launcher 应用程序"),

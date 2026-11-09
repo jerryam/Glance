@@ -474,6 +474,13 @@ struct SettingsView: View {
                 SettingsToggle("容忍英文或完整拼音的一处拼写错误", isOn: $model.draft.advanced.searchTypos)
                 SettingsNote("名称匹配优先于拼音、首字母和拼写容错；同等匹配优先最近使用的窗口。四个字符起支持一处错字、漏字、多字或相邻字母颠倒。")
                 Group {
+                    SettingsToggle("允许跳过中间的字", isOn: $model.draft.advanced.searchSkips)
+                    SettingsChoice("双拼方案", selection: $model.draft.advanced.shuangpin) {
+                        ForEach(ShuangpinScheme.allCases) { Text($0.label).tag($0) }
+                    }
+                    SettingsNote("多音字的每个读音都能搜到（chongqing 找到重庆），汉字、全拼和首字母可以混着输入（微xin、wxin 都找到微信）。跳字匹配排在最后：chrm 找到 Chrome，wjq 找到文件管理器。")
+                }
+                Group {
                     SettingsToggle("把常选的结果排到前面", isOn: $model.draft.advanced.searchLearning)
                     SettingsNote("同一个搜索连续选同一个结果两次后，它会排到最前面；改选别的结果，顺序也会跟着变。记录只保存在这台 Mac 上，包括输入的文字和选中的应用或设置页面，不包括窗口标题，也不随设置导出。")
                     HStack(spacing: 8) {
