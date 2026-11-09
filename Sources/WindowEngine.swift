@@ -181,6 +181,11 @@ final class WindowEngine: ObservableObject {
                 self?.watchApplications(); self?.trackFocus(); self?.onWindowsChange?(); self?.markCacheStale()
             })
         }
+        // A window going full screen moves to its own Space, and may only say so once it has settled there.
+        // Nothing else reports it, now that resizing is not watched, and the "ignore when full screen" rule needs to know.
+        workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.trackFocus() }
+        })
         watchApplications()
     }
     deinit {

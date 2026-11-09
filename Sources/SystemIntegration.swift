@@ -67,7 +67,7 @@ final class FrontFullscreenWatch {
         // Each signal misses some games, so any one of them counts.
         let options = NSApp.currentSystemPresentationOptions
         let menuBarHidden = options.contains(.fullScreen) || options.contains(.hideMenuBar)
-        queue.async {
+        queue.async { [weak self] in
             let value = FrontFullscreenPolicy.isActive(windowFullscreen: Self.focusedWindowIsFullscreen(pid), menuBarHidden: menuBarHidden,
                                                        frontWindows: Self.windows(of: pid), displays: Self.displays())
             DispatchQueue.main.async { [weak self] in
