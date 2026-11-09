@@ -258,7 +258,7 @@ extension AppDelegate {
             let layout = LayoutSnapshotPolicy.capture(name: name, windows: handles.map(\.descriptor), screens: WindowControl.screenAreas(), now: Date.timeIntervalSinceReferenceDate)
             guard !layout.windows.isEmpty else { self.showNotice("现在没有可以保存的窗口。最小化的窗口、隐藏的应用和全屏窗口不会保存。"); return }
             guard let updated = LayoutSnapshotPolicy.adding(layout, to: self.layouts) else {
-                self.showNotice("最多保存 \(LayoutSnapshotPolicy.limit) 个布局，请先在 设置 › 输入和搜索 里删除不用的。")
+                self.showNotice("最多保存 \(LayoutSnapshotPolicy.limit) 个布局，请先在 设置 › 搜索与按键 里删除不用的。")
                 return
             }
             self.layouts = updated
