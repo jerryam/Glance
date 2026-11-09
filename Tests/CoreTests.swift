@@ -267,7 +267,72 @@ struct CoreTests {
         verifyVersion16()
         verifyVersion20()
         verifyMenuBar()
+        verifyPinsAndRecovery()
         print("\(passed) checks passed")
+    }
+    static func verifyPinsAndRecovery() {
+        check(SettingsReturnPolicy.comesToFront(wasKey: true, cancelled: true, demo: false), "在设置窗口上取消面板后，设置窗口回到前面")
+        check(SettingsReturnPolicy.comesToFront(wasKey: true, cancelled: false, demo: true), "演示结束后，设置窗口回到前面")
+        check(!SettingsReturnPolicy.comesToFront(wasKey: true, cancelled: false, demo: false), "切换到别的窗口后，设置窗口不遮挡它")
+        check(!SettingsReturnPolicy.comesToFront(wasKey: false, cancelled: true, demo: false), "设置窗口原本不在前面时，取消面板不抢走焦点")
+
+        var damaged = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(UserSettings.defaults)) as! [String: Any]
+        damaged["showHidden"] = "not-a-bool"; damaged["thumbnailWidth"] = 300
+        var advanced = damaged["advanced"] as! [String: Any]
+        advanced["browserTabs"] = "not-a-bool"; advanced["commandLineEnabled"] = true
+        damaged["advanced"] = advanced
+        let damagedData = try! JSONSerialization.data(withJSONObject: damaged)
+        check((try? JSONDecoder().decode(UserSettings.self, from: damagedData)) == nil, "有一个值损坏时，整份配置无法读取")
+        let salvaged = UserSettings.salvaged(from: damagedData)
+        check(salvaged?.thumbnailWidth == 300 && salvaged?.showHidden == true, "损坏的值用默认值，其他值保留")
+        check(salvaged?.advanced.commandLineEnabled == true && salvaged?.advanced.browserTabs == false, "分组里有损坏的值时，同组其他值保留")
+        check(UserSettings.salvaged(from: Data("not json".utf8)) == nil, "不是 JSON 的内容无法恢复")
+        check(UserSettings.salvaged(from: Data("{\"showHidden\":\"x\"}".utf8)) == nil, "没有任何可用的值时无法恢复")
+
+        func pinWindow(_ id: String, _ windowID: UInt32?, pid: Int32, bundle: String = "com.apple.Safari", title: String) -> WindowDescriptor {
+            WindowDescriptor(id: id, windowID: windowID, pid: pid, appName: "Safari", bundleID: bundle, title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        }
+        func resolve(_ pins: [WindowPin], _ windows: [WindowDescriptor], running: [Int32: String] = [:], live: Set<UInt32> = []) -> [WindowPin] {
+            PinPolicy.resolve(pins, windows: windows, runningApps: running, liveWindowIDs: live)
+        }
+        let safari = "com.apple.Safari"
+        let pin = WindowPin(pinWindow("cg:7", 7, pid: 100, title: "报告"))
+        check(resolve([pin], [pinWindow("cg:7", 7, pid: 100, title: "报告 2")]).first?.title == "报告 2", "同一个窗口改名后，置顶跟着更新标题")
+        check(resolve([pin], [pinWindow("cg:7", 7, pid: 100, title: "")]).first?.title == "报告", "暂时读不到标题时，保留原来的标题")
+        let reused = resolve([pin], [pinWindow("cg:7", 7, pid: 200, bundle: "com.other", title: "别的窗口")], running: [200: "com.other"])
+        check(reused.count == 1 && PinPolicy.boundIDs(reused).isEmpty, "重启后窗口号被别的应用复用时，不会置顶到它上面")
+        check(resolve([pin], [pinWindow("cg:9", 9, pid: 300, title: "报告")]).first?.id == "cg:9", "应用重开后，按应用和标题找回窗口")
+        let twins = [pinWindow("cg:8", 8, pid: 300, title: "报告"), pinWindow("cg:9", 9, pid: 300, title: "报告")]
+        check(PinPolicy.boundIDs(resolve([pin], twins)).isEmpty, "有两个同名窗口时不猜")
+        let first = WindowPin(pinWindow("cg:1", 1, pid: 100, title: "同名")), second = WindowPin(pinWindow("cg:2", 2, pid: 50, title: "同名"))
+        check(PinPolicy.boundIDs(resolve([first, second], [pinWindow("cg:1", 1, pid: 100, title: "同名")])) == ["cg:1"], "已被占用的窗口不会再被另一个置顶按标题占用")
+        check(resolve([pin], [], running: [100: safari], live: [7]).first?.id == "cg:7", "窗口还在、只是这次没读到时，保留置顶")
+        check(resolve([pin], [], running: [100: safari]).isEmpty, "应用还在运行而窗口已关闭时，取消置顶")
+        let waiting = resolve([pin], [])
+        check(waiting.count == 1 && waiting[0].id.isEmpty, "应用没有运行时，置顶等它重新打开这个窗口")
+        check(resolve(waiting, [pinWindow("cg:11", 11, pid: 400, title: "报告")]).first?.id == "cg:11", "等待中的置顶在窗口出现后生效")
+        let legacy = resolve([WindowPin(legacyID: "cg:7")], [pinWindow("cg:7", 7, pid: 100, title: "报告")])
+        check(legacy.first?.bundleID == safari && legacy.first?.title == "报告", "旧版保存的置顶补上应用和标题")
+        check(resolve([WindowPin(legacyID: "cg:7")], []).isEmpty, "旧版保存的置顶找不到窗口时不保留")
+        check(resolve([WindowPin(pinWindow("app:100", nil, pid: 100, title: ""))], []).isEmpty, "没有标题的置顶在应用退出后无法找回，不保留")
+        check(PinPolicy.adding(pin, to: [pin]).count == 1, "同一个窗口不重复置顶")
+        let many = (0..<40).reduce([WindowPin]()) { PinPolicy.adding(WindowPin(pinWindow("cg:\($1)", UInt32($1), pid: 100, title: "窗口")), to: $0) }
+        check(many.count == PinPolicy.limit && many.last?.id == "cg:39", "置顶数量有上限，保留最新的")
+        let roundTrip = try? JSONDecoder().decode([WindowPin].self, from: JSONEncoder().encode([pin]))
+        check(roundTrip == [pin], "置顶可以保存和读取")
+
+        let tricky = "a\"b\\c\nd'); evil(); ('"
+        let literal = BrowserTabScript.literal(tricky)
+        check(literal.flatMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) } == tricky, "标签页文字写入脚本后内容不变")
+        check(literal?.hasPrefix("\"") == true && literal?.hasSuffix("\"") == true && literal?.contains("\n") == false, "标签页文字只能作为字符串进入脚本")
+
+        let a = pinWindow("cg:1", 1, pid: 100, title: "甲"), b = pinWindow("cg:2", 2, pid: 100, title: "乙")
+        var stamped = a; stamped.lastFocused = 99
+        var renamedWindow = a; renamedWindow.title = "丙"
+        check(!WindowListChange.matters(from: [a, b], to: [stamped, b]), "只有前台时间戳变化时不重新布局")
+        check(WindowListChange.matters(from: [a, b], to: [b, a]), "窗口顺序变化时重新布局")
+        check(WindowListChange.matters(from: [a, b], to: [renamedWindow, b]), "标题变化时重新布局")
+        check(WindowListChange.matters(from: [a, b], to: [a]), "窗口数量变化时重新布局")
     }
     static func verifyMenuBar() {
         check(MenuBarPolicy.identity(bundle: "com.liguangming.Shadowrocket", identifier: nil) == "bundle:com.liguangming.Shadowrocket", "菜单栏图标按所属应用识别")
@@ -649,5 +714,18 @@ struct CoreTests {
         check(WindowDiscoveryPolicy.includesWindowlessApp(accessibilityTrusted: true, windowListAvailable: true, liveWindowCount: 0), "真实无窗口应用可重新打开")
         check(!WindowDiscoveryPolicy.includesWindowlessApp(accessibilityTrusted: true, windowListAvailable: false, liveWindowCount: 0), "窗口读取失败不冒充无窗口应用")
         check(!WindowDiscoveryPolicy.includesWindowlessApp(accessibilityTrusted: true, windowListAvailable: true, liveWindowCount: 1), "有真实窗口时不再生成应用占位项")
+        check(WindowDiscoveryPolicy.keepsUnanswered(windowID: 5, liveWindowIDs: [5]), "没有回应的应用保留仍然存在的窗口")
+        check(!WindowDiscoveryPolicy.keepsUnanswered(windowID: 6, liveWindowIDs: [5]), "没有回应的应用不保留已经关闭的窗口")
+        check(WindowDiscoveryPolicy.keepsUnanswered(windowID: nil, liveWindowIDs: []), "没有窗口编号的项目等应用回应后再判断")
+        check(CachedPickPolicy.freshIndex(pickedID: "b", selectedID: "b", searching: false, steps: 1, count: 4) == 1, "缓存漏掉新窗口时，用最新列表重新选中第二项")
+        check(CachedPickPolicy.freshIndex(pickedID: "b", selectedID: "b", searching: false, steps: -1, count: 4) == 3, "反向触发时，用最新列表重新选中最后一项")
+        check(CachedPickPolicy.freshIndex(pickedID: "b", selectedID: "c", searching: false, steps: 1, count: 4) == nil, "选择被手动改过后不再重新选中")
+        check(CachedPickPolicy.freshIndex(pickedID: nil, selectedID: "b", searching: false, steps: 1, count: 4) == nil, "没有用缓存选中时不改动选择")
+        check(CachedPickPolicy.freshIndex(pickedID: "b", selectedID: "b", searching: true, steps: 1, count: 4) == nil, "搜索时不改动选择")
+        check(CachedPickPolicy.freshIndex(pickedID: "b", selectedID: "b", searching: false, steps: 1, count: 0) == nil, "最新列表为空时不改动选择")
+        let answers = DeadlineSlots<Int>(count: 2)
+        check(answers.store(7, at: 0), "截止之前的结果可以写入")
+        let collected = answers.close()
+        check(collected[0] == 7 && collected[1] == nil && !answers.store(8, at: 1), "截止之后的结果不写入，未回应的位置为空")
     }
 }

@@ -324,6 +324,35 @@ struct UserSettings: Codable, Equatable {
         }
         return result
     }
+    /// What can still be read from a stored configuration that no longer decodes as a whole, for example one
+    /// written by a newer version: every value that decodes is kept, the others stay at their defaults.
+    /// Nil when the data holds nothing usable.
+    static func salvaged(from data: Data) -> UserSettings? {
+        func decoded(_ object: [String: Any]) -> UserSettings? {
+            guard let bytes = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? JSONDecoder().decode(UserSettings.self, from: bytes)
+        }
+        guard let saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let defaults = try? JSONEncoder().encode(UserSettings.defaults),
+              var result = (try? JSONSerialization.jsonObject(with: defaults)) as? [String: Any] else { return nil }
+        var kept = 0
+        for key in saved.keys.sorted() where result[key] != nil {
+            var trial = result
+            trial[key] = saved[key]
+            if decoded(trial) != nil { result = trial; kept += 1; continue }
+            // One bad value fails a whole group such as `advanced`; the rest of the group can still be kept.
+            guard let group = saved[key] as? [String: Any], var merged = result[key] as? [String: Any] else { continue }
+            for inner in group.keys.sorted() {
+                var attempt = merged
+                attempt[inner] = group[inner]
+                var whole = result
+                whole[key] = attempt
+                if decoded(whole) != nil { merged = attempt; kept += 1 }
+            }
+            result[key] = merged
+        }
+        return kept > 0 ? decoded(result) : nil
+    }
     /// Turns on the first unused scheme slot with a trigger that does not collide with the others.
     func withNewProfile() -> (settings: UserSettings, id: Int)? {
         guard let slot = shortcuts.firstIndex(where: { !$0.enabled }) else { return nil }

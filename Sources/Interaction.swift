@@ -213,6 +213,103 @@ enum GlobalShortcutMatch {
     }
 }
 
+/// A panel's first selection is made from the cached list, which can miss a window opened since it was read;
+/// every position after that window is then off by one. While the selection is still that first pick, it is
+/// made again from the fresh list. A selection changed by hand or a search stays as it is.
+enum CachedPickPolicy {
+    static func freshIndex(pickedID: String?, selectedID: String?, searching: Bool, steps: Int, count: Int) -> Int? {
+        guard let pickedID, pickedID == selectedID, !searching, count > 0 else { return nil }
+        return WindowNavigation.linear(index: 0, count: count, step: steps)
+    }
+}
+
+/// The settings window stays out of the way while the panel is open. Cancelling the panel over it, or ending
+/// the demo started from it, brings it back in front; after a switch it must not cover the new window.
+enum SettingsReturnPolicy {
+    static func comesToFront(wasKey: Bool, cancelled: Bool, demo: Bool) -> Bool { wasKey && (cancelled || demo) }
+}
+
+enum WindowListChange {
+    /// Whether a fresh read changes anything the panel shows. Every read stamps the front window with the
+    /// current time, so focus times count only through the order they put the windows in.
+    static func matters(from old: [WindowDescriptor], to new: [WindowDescriptor]) -> Bool {
+        guard old.count == new.count else { return true }
+        return zip(old, new).contains { before, after in
+            var stamped = after
+            stamped.lastFocused = before.lastFocused
+            return before != stamped
+        }
+    }
+}
+
+enum BrowserTabScript {
+    /// Text from a web page enters a script only as a JSON string, which it cannot end to become code.
+    static func literal(_ text: String) -> String? {
+        (try? JSONEncoder().encode(text)).flatMap { String(data: $0, encoding: .utf8) }
+    }
+}
+
+/// A pinned window as it is saved. A window number only means something until the window server restarts, so a
+/// pin also remembers the app and the title, to find its window again after the app or the Mac has restarted.
+struct WindowPin: Codable, Equatable {
+    /// Empty while the pin waits for its app to open that window again.
+    var id: String
+    var windowID: UInt32?
+    /// Zero when no process stands behind the pin: it is waiting, or an older version saved it.
+    var pid: Int32
+    var bundleID: String
+    var title: String
+    init(_ window: WindowDescriptor) {
+        id = window.id; windowID = window.windowID; pid = window.pid; bundleID = window.bundleID; title = window.title
+    }
+    /// Versions before 2.3.2 saved only the id.
+    init(legacyID: String) {
+        id = legacyID; windowID = legacyID.hasPrefix("cg:") ? UInt32(legacyID.dropFirst(3)) : nil; pid = 0; bundleID = ""; title = ""
+    }
+}
+
+enum PinPolicy {
+    static let limit = 32
+    static func adding(_ pin: WindowPin, to pins: [WindowPin]) -> [WindowPin] {
+        Array((pins.filter { $0.id != pin.id } + [pin]).suffix(limit))
+    }
+    /// The ids that are pinned right now. A waiting pin has none, so it can never mark another window.
+    static func boundIDs(_ pins: [WindowPin]) -> Set<String> { Set(pins.map(\.id).filter { !$0.isEmpty }) }
+    /// Which window each pin means after a fresh read. An id counts only for the same process and app, because
+    /// a restarted window server hands out the same numbers again. With the process gone, a pin moves to the one
+    /// window of that app with its title; with several it does not guess, and waits until there is just one.
+    static func resolve(_ pins: [WindowPin], windows: [WindowDescriptor], runningApps: [Int32: String], liveWindowIDs: Set<UInt32>) -> [WindowPin] {
+        let byID = Dictionary(windows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func sameWindow(_ pin: WindowPin) -> WindowDescriptor? {
+            guard let window = byID[pin.id], pin.pid == 0 || (window.pid == pin.pid && window.bundleID == pin.bundleID) else { return nil }
+            return window
+        }
+        var claimed = Set(pins.compactMap { sameWindow($0)?.id })
+        var result: [WindowPin] = []
+        for pin in pins {
+            if let window = sameWindow(pin) {
+                var updated = WindowPin(window)
+                if window.title.isEmpty { updated.title = pin.title }
+                result.append(updated)
+            } else if runningApps[pin.pid] == pin.bundleID {
+                // Its process still runs, so the window was closed, or this read only missed it.
+                if WindowDiscoveryPolicy.keepsUnanswered(windowID: pin.windowID, liveWindowIDs: liveWindowIDs) { result.append(pin) }
+            } else if !pin.bundleID.isEmpty, !pin.title.isEmpty {
+                let candidates = windows.filter { $0.bundleID == pin.bundleID && $0.title == pin.title && !claimed.contains($0.id) }
+                if candidates.count == 1 {
+                    claimed.insert(candidates[0].id)
+                    result.append(WindowPin(candidates[0]))
+                } else {
+                    var waiting = pin
+                    waiting.id = ""; waiting.windowID = nil; waiting.pid = 0
+                    result.append(waiting)
+                }
+            }
+        }
+        return result
+    }
+}
+
 enum PendingReleasePolicy {
     static func keepPendingCommit(previous: Bool, triggerPressed: Bool, triggerHeld: Bool) -> Bool {
         previous && !triggerPressed && !triggerHeld
@@ -235,6 +332,11 @@ enum WindowDiscoveryPolicy {
     static func includesUnboundSurface(accessibilityTrusted: Bool) -> Bool { !accessibilityTrusted }
     static func includesWindowlessApp(accessibilityTrusted: Bool, windowListAvailable: Bool, liveWindowCount: Int) -> Bool {
         accessibilityTrusted && windowListAvailable && liveWindowCount == 0
+    }
+    /// An app that did not answer keeps its last known windows, except those the window server no longer has.
+    /// A window without a number cannot be checked, so it stays until the app answers again.
+    static func keepsUnanswered(windowID: UInt32?, liveWindowIDs: Set<UInt32>) -> Bool {
+        windowID.map { liveWindowIDs.contains($0) } ?? true
     }
 }
 
@@ -349,6 +451,26 @@ struct RefreshTicketQueue<Callback> {
         let callbacks = pending.prefix { $0.0 <= revision }.map { $0.1 }
         pending.removeFirst(callbacks.count)
         return callbacks
+    }
+}
+
+/// Results collected up to a deadline. Closing ends the wait; whatever arrives later is left to the sender.
+final class DeadlineSlots<Value> {
+    private let lock = NSLock()
+    private var values: [Value?]
+    private var closed = false
+    init(count: Int) { values = Array(repeating: nil, count: count) }
+    /// False when the deadline has already passed.
+    func store(_ value: Value, at index: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return false }
+        values[index] = value
+        return true
+    }
+    func close() -> [Value?] {
+        lock.lock(); defer { lock.unlock() }
+        closed = true
+        return values
     }
 }
 
