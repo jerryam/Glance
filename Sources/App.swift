@@ -28,7 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let menuBar = MenuBarController()
     let launcher = LaunchCatalog()
     let dockPreview = DockPreviewController()
-    var browserTabResults: [WindowHandle] = []
+    let frontFullscreen = FrontFullscreenWatch()
+    var browserTabs = BrowserTabCache<WindowHandle>()
     var panel: SwitcherPanel!
     var previewPanel: PreviewPanel?
     var settingsWindow: NSWindow?
@@ -37,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var loadNoticeShown = false
     var localMonitor: Any?
     var globalMonitor: Any?
+    var panelClickMonitor: Any?
+    var quickCommitCount = 0
+    var waitedCommitCount = 0
     var previewTimer: Timer?
     var backgroundTimer: Timer?
     var panelRefreshTimer: Timer?
@@ -143,6 +147,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         launcher.refreshIfNeeded()
         setupDockPreview()
         menuBar.onRevealChange = { [weak self] in self?.updateStatusButton() }
+        menuBar.onPointerMoved = { [weak self] in self?.frontFullscreen.lookIfDue() }
+        frontFullscreen.onChange = { [weak self] in
+            guard let self else { return }
+            self.menuBar.pausedForFullscreen = self.frontFullscreen.active
+            self.syncActivityTimers()
+        }
+        frontFullscreen.look()
         panelInput.shouldCapture = { [weak self] event in
             guard let self, self.showing else { return false }
             let marked = (self.panel.firstResponder as? NSTextView)?.hasMarkedText() ?? false
@@ -170,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         engine.onForegroundChange = { [weak self] in self?.updateHotkeyGate() }
         engine.onWindowsChange = { [weak self] in self?.schedulePanelRefresh() }
         engine.onCacheStale = { [weak self] in self?.scheduleIdleRefresh() }
-        engine.onTitleChange = { [weak self] id, title in self?.updateTitle(id, title: title) }
+        engine.onTitlesChange = { [weak self] changes in self?.updateTitles(changes) }
         gestures.onGesture = { [weak self] result in self?.handleGesture(result) ?? false }
         settings.onChange = { [weak self] in self?.applySettings() }
         applySettings()
@@ -188,11 +199,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if event.type == .keyUp { return event }
             return self.handleKey(event) ? nil : event
         }
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .leftMouseDown, .rightMouseDown]) { [weak self] event in
-            if event.type == .flagsChanged {
-                if self?.panelInput.enabled != true { self?.inputModifiers(event.modifierFlags) }
-            }
-            else if self?.showing == true { self?.dismiss() }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+            if self?.panelInput.enabled != true { self?.inputModifiers(event.modifierFlags) }
         }
         supportObservers.append(NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.stopActivityTimers(); self?.syncActivityTimers()
@@ -284,10 +292,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         releaseTimer?.invalidate(); releaseTimer = nil
     }
     func syncActivityTimers() {
+        // A click elsewhere closes the panel. Watched only while it is open, so a game's clicks do not wake 一瞥.
+        if showing && panelClickMonitor == nil {
+            panelClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                if self?.showing == true { self?.dismiss() }
+            }
+        } else if !showing, let monitor = panelClickMonitor {
+            NSEvent.removeMonitor(monitor); panelClickMonitor = nil
+        }
         guard !sleeping else { stopActivityTimers(); return }
         let plan = ActivityTimerPlan(showing: showing, demo: state.isDemo, previews: state.settings.livePreviews,
             thumbnails: state.style == .thumbnails || state.searchVisible, largePreview: previewPanel?.isVisible == true,
-            background: settings.value.advanced.backgroundPreviews && CGPreflightScreenCaptureAccess(),
+            background: settings.value.advanced.backgroundPreviews && CGPreflightScreenCaptureAccess() && !frontFullscreen.active,
             transient: !state.sticky && !state.searchVisible && !gestureActive && !state.profile.modifiers.isEmpty)
         panelInput.setEnabled(showing && !recording)
         if !plan.release { releaseTimer?.invalidate(); releaseTimer = nil }
@@ -316,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         else if backgroundTimer == nil {
             backgroundTimer = activityTimer(interval: ProcessInfo.processInfo.isLowPowerModeEnabled ? 10 : 5) { [weak self] in
                 guard let self else { return }
+                self.frontFullscreen.lookIfDue()
                 self.engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in
                     guard let self, !self.showing, self.settings.value.advanced.backgroundPreviews else { return }
                     self.state.retainPreviews(Set(handles.map(\.id)))
@@ -356,14 +373,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let sinceLast = ProcessInfo.processInfo.systemUptime - idleRefreshedAt
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0.25, 1 - sinceLast), execute: work)
     }
-    /// A title change only updates that entry; it no longer re-reads every window of every app.
-    func updateTitle(_ id: String, title: String) {
-        guard showing, !state.isDemo, let index = state.all.firstIndex(where: { $0.id == id }) else { return }
-        var descriptor = state.all[index].descriptor
-        guard descriptor.title != title else { return }
-        descriptor.title = title
-        state.all[index] = state.all[index].with(descriptor)
-        state.refilter(reset: false)
+    /// Title changes only update those entries, and arrive in batches: a ticking title costs one filter and
+    /// layout per batch at most.
+    func updateTitles(_ changes: [String: String]) {
+        guard showing, !state.isDemo else { return }
+        var changed = false
+        for index in state.all.indices {
+            guard let title = changes[state.all[index].id], state.all[index].descriptor.title != title else { continue }
+            var descriptor = state.all[index].descriptor
+            descriptor.title = title
+            state.all[index] = state.all[index].with(descriptor)
+            changed = true
+        }
+        if changed { state.refilter(reset: false) }
     }
 
     /// The panel background: Liquid Glass on macOS 26 and later, a popover material before that.
@@ -492,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         WindowControl.preferWindowServer = settings.value.advanced.focusMethod == .windowServer
         engine.scanTabs = settings.value.shortcuts.contains { $0.enabled && $0.separateTabs } ||
             (settings.value.advanced.independentGesture?.separateTabs ?? false)
+        if !settings.value.advanced.browserTabs { browserTabs = BrowserTabCache() }
         applyHotkeys(reconfigure: true)
         engine.refreshObservers()
         gestures.configure(settings.value.advanced.gesture, avoidsSystem: settings.value.advanced.gestureAvoidsSystem)
@@ -661,6 +684,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "windowObservers": engine.observedWindowCount, "windowEventCounts": engine.observerEventCounts,
          "windowDiscovery": ["suppressedSurfaces": engine.suppressedSurfaceCount, "unavailableWindowLists": engine.unavailableWindowListCount,
                              "lateScans": engine.lateScanCount, "idleRefreshes": idleRefreshCount],
+         "quickRelease": ["atOnce": quickCommitCount, "waited": waitedCommitCount],
+         "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
     }
@@ -865,7 +890,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func confirm() {
         guard showing else { return }
-        if state.loading { pendingCommit = true; pendingFocusID = state.selected?.id; return }
+        var fromCache = false
+        if state.loading {
+            // Already waiting for the fresh list: the release timer asks again every 50 ms, and the list settles it.
+            let untouched = !pendingCommit && cachedPickID != nil && state.selected?.id == cachedPickID && !state.searchVisible
+            guard QuickCommitPolicy.commitsNow(selectionUntouched: untouched, cacheAge: engine.cacheAge, cacheStale: engine.cacheStale) else {
+                if !pendingCommit { waitedCommitCount += 1 }
+                pendingCommit = true; pendingFocusID = state.selected?.id; return
+            }
+            quickCommitCount += 1
+            fromCache = true
+        }
         guard let selected = state.selected else {
             if !state.sticky && !state.searchVisible { dismiss(cancelled: true) }
             return
@@ -886,6 +921,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !AXIsProcessTrusted() && selected.browserTab == nil { state.setMessage("请先开启辅助功能权限。", error: true); state.sticky = true; relayout(); return }
         if selected.browserTab != nil { focusBrowserTab(selected); return }
         if let error = WindowControl.perform(.focus, on: selected) {
+            // The cached entry may be out of date: the read in progress decides, as if this had waited for it.
+            if fromCache && state.loading { pendingCommit = true; pendingFocusID = selected.id; return }
             pendingCommit = false; state.sticky = true; state.setMessage(error, error: true); relayout()
             panel.makeKeyAndOrderFront(nil); return
         }

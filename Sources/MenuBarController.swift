@@ -30,6 +30,11 @@ final class MenuBarController: ObservableObject {
     private(set) var settings = MenuBarSettings()
     /// The 一瞥 icon reflects whether hidden icons are showing.
     var onRevealChange: (() -> Void)?
+    /// Every pointer movement while hover is watched, which is when it matters whether watching still makes sense.
+    var onPointerMoved: (() -> Void)?
+    /// The front app has taken over the screen: the menu bar is out of reach, so hover is not watched at all.
+    var pausedForFullscreen = false { didSet { if pausedForFullscreen != oldValue { updateHoverMonitor() } } }
+    var hoverMonitorActive: Bool { mouseMonitor != nil }
 
     var available: Bool { Self.isSupported && GLMenuBarHidingAvailable() }
     /// A left click on the 一瞥 icon shows hidden icons instead of opening the menu.
@@ -205,7 +210,7 @@ final class MenuBarController: ObservableObject {
     // MARK: Hover
 
     private func updateHoverMonitor() {
-        let wanted = available && settings.revealOnHover && settings.hidesAnything
+        let wanted = available && settings.revealOnHover && settings.hidesAnything && !pausedForFullscreen
         if wanted && mouseMonitor == nil {
             mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in self?.pointerMoved() }
             measureFrontMenus()
@@ -216,6 +221,7 @@ final class MenuBarController: ObservableObject {
     }
 
     private func pointerMoved() {
+        onPointerMoved?()
         guard reveal == .none else { return }
         guard inHoverZone() else { hoverWork?.cancel(); hoverWork = nil; return }
         guard hoverWork == nil else { return }

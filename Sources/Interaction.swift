@@ -1,4 +1,5 @@
 import Foundation
+import ApplicationServices
 
 enum WindowNavigation {
     static func linear(index: Int, count: Int, step: Int) -> Int {
@@ -220,6 +221,96 @@ enum CachedPickPolicy {
     static func freshIndex(pickedID: String?, selectedID: String?, searching: Bool, steps: Int, count: Int) -> Int? {
         guard let pickedID, pickedID == selectedID, !searching, count > 0 else { return nil }
         return WindowNavigation.linear(index: 0, count: count, step: steps)
+    }
+}
+
+/// A quick release can switch from the cached list instead of waiting for the read in progress, which takes up to
+/// 0.3 seconds when an app is slow. A cached list can miss a window opened since it was read, which moves the
+/// selection by one, so this needs a recent read with no window or app event after it, and a selection still
+/// made by the trigger alone.
+enum QuickCommitPolicy {
+    /// As long as the open panel's fallback refresh trusts a list, for apps that omit window notifications.
+    static let maximumCacheAge: TimeInterval = 10
+    static func commitsNow(selectionUntouched: Bool, cacheAge: TimeInterval, cacheStale: Bool) -> Bool {
+        selectionUntouched && !cacheStale && cacheAge <= maximumCacheAge
+    }
+}
+
+/// Whether the front app has taken over the screen, as a game does. A plain window filling a display does not
+/// count: it sits below the menu bar, which can still be reached.
+enum FrontFullscreenPolicy {
+    static func isActive(windowFullscreen: Bool, menuBarHidden: Bool, frontWindows: [(layer: Int, frame: WindowRect)], displays: [WindowRect]) -> Bool {
+        if windowFullscreen || menuBarHidden { return true }
+        return frontWindows.contains { window in
+            window.layer > 0 && displays.contains { display in
+                window.frame.x <= display.x && window.frame.y <= display.y
+                    && window.frame.x + window.frame.width >= display.x + display.width
+                    && window.frame.y + window.frame.height >= display.y + display.height
+            }
+        }
+    }
+}
+
+/// Changes collected until the next flush. Only the first one asks for a flush, so a title that keeps ticking
+/// cannot put it off.
+struct ChangeBatch<Element> {
+    private var elements: [Element] = []
+    private var scheduled = false
+    /// True when the caller should schedule a flush.
+    mutating func add(_ element: Element, same: (Element, Element) -> Bool) -> Bool {
+        if !elements.contains(where: { same($0, element) }) { elements.append(element) }
+        defer { scheduled = true }
+        return !scheduled
+    }
+    mutating func flush() -> [Element] {
+        defer { elements = []; scheduled = false }
+        return elements
+    }
+}
+
+/// What a search knows about each browser's tabs. Last time's tabs show at once and each browser's answer replaces
+/// only its own, so a slow browser holds up nothing. A tab closed since is caught when switching to it.
+struct BrowserTabCache<Tab> {
+    private var order: [String] = []
+    private var tabs: [String: [Tab]] = [:]
+    /// nil means the browser did not answer, so what is known about it stays.
+    mutating func update(_ browser: String, tabs new: [Tab]?) {
+        if let new { tabs[browser] = new }
+    }
+    /// The browsers running now, in a fixed order, so results do not trade places by who answered first.
+    mutating func keep(only browsers: [String]) {
+        order = browsers
+        tabs = tabs.filter { browsers.contains($0.key) }
+    }
+    var all: [Tab] { order.flatMap { tabs[$0] ?? [] } }
+}
+
+/// What the window list reads from one window, in a single round trip to its app.
+struct AXWindowFacts {
+    var title = "", role = "", subrole = ""
+    var frame = CGRect.zero
+    var minimized = false, fullscreen = false
+    static let attributes: [String] = [kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXMinimizedAttribute,
+                                       kAXRoleAttribute, kAXSubroleAttribute, "AXFullScreen"]
+    init() {}
+    /// Values in the order of `attributes`. One the window does not have arrives as an error value and keeps its default.
+    init(values: [AnyObject]) {
+        func value(_ index: Int) -> AnyObject? {
+            guard index < values.count else { return nil }
+            let item = values[index]
+            if CFGetTypeID(item) == AXValueGetTypeID(), AXValueGetType(item as! AXValue) == .axError { return nil }
+            return item
+        }
+        title = value(0) as? String ?? ""
+        var point = CGPoint.zero, size = CGSize.zero
+        if let position = value(1), CFGetTypeID(position) == AXValueGetTypeID(), AXValueGetValue(position as! AXValue, .cgPoint, &point),
+           let dimension = value(2), CFGetTypeID(dimension) == AXValueGetTypeID(), AXValueGetValue(dimension as! AXValue, .cgSize, &size) {
+            frame = CGRect(origin: point, size: size)
+        }
+        minimized = (value(3) as? NSNumber)?.boolValue ?? false
+        role = value(4) as? String ?? ""
+        subrole = value(5) as? String ?? ""
+        fullscreen = (value(6) as? NSNumber)?.boolValue ?? false
     }
 }
 

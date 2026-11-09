@@ -115,10 +115,13 @@ extension AppDelegate {
         guard showing, !state.isDemo, settings.value.advanced.browserTabs, browserTabsLoadedFor != showGeneration else { return }
         browserTabsLoadedFor = showGeneration
         let generation = showGeneration
-        BrowserTabs.list { [weak self] tabs in
-            guard let self, self.showing, self.showGeneration == generation else { return }
-            self.browserTabResults = tabs
-            self.updateExtraItems()
+        browserTabs.keep(only: BrowserTabs.runningKeys)
+        // Last time's tabs show at once; each browser's answer then replaces its own, even after the panel has closed.
+        updateExtraItems()
+        BrowserTabs.list { [weak self] browser, tabs in
+            guard let self else { return }
+            self.browserTabs.update(browser, tabs: tabs)
+            if self.showing, self.showGeneration == generation { self.updateExtraItems() }
         }
     }
     /// The panel stays until the browser has answered, so a tab that cannot be reached can say why, like any
@@ -144,9 +147,8 @@ extension AppDelegate {
     /// Search-only results: browser tabs and menu bar icons.
     func updateExtraItems() {
         guard showing, !state.isDemo else { return }
-        if browserTabsLoadedFor != showGeneration { browserTabResults = [] }
         let advanced = settings.value.advanced
-        state.extraItems = browserTabResults + menuBar.searchResults()
+        state.extraItems = (advanced.browserTabs ? browserTabs.all : []) + menuBar.searchResults()
             + launcher.results(apps: advanced.searchApps, settingsPages: advanced.searchSettingsPages)
         if !state.query.isEmpty { state.refilter(reset: false) }
     }
