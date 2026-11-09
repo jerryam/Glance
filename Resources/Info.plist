@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <!-- The identifier stays from 窗间 / WindowHop so settings, pins and permissions carry over. -->
+    <key>CFBundleIdentifier</key><string>com.jethro.windowhop</string>
+    <key>CFBundleName</key><string>Glance</string>
+    <key>CFBundleDisplayName</key><string>一瞥</string>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>LSHasLocalizedDisplayName</key><true/>
+    <key>CFBundleExecutable</key><string>Glance</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>2.3.1</string>
+    <key>CFBundleVersion</key><string>16</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <key>NSAppleEventsUsageDescription</key><string>开启“搜索时包含浏览器标签页”后，一瞥会列出并切换 Safari、Chrome 等浏览器的标签页，不读取网页内容。</string>
+    <key>NSHumanReadableCopyright</key><string>一瞥 · 为 Jethro 制作的个人窗口切换器</string>
+</dict></plist>

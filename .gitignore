@@ -1,0 +1,6 @@
+.build/
+Glance.app/
+build.log
+ui-snapshots/
+menubar-probe.json
+menubar-selftest.json
