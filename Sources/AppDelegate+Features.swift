@@ -28,17 +28,22 @@ extension AppDelegate {
 
     // MARK: Pinned windows
 
-    static let pinsKey = "WindowHop.pinned.v1"
+    static let pinsKey = "WindowHop.pinned.v2"
+    static let legacyPinsKey = "WindowHop.pinned.v1"
+    /// Saved pins count only once a fresh read has matched them to real windows; see syncPins.
     func loadPins() {
-        pinnedIDs = Set(UserDefaults.standard.stringArray(forKey: Self.pinsKey) ?? [])
+        let store = UserDefaults.standard
+        if let data = store.data(forKey: Self.pinsKey), let saved = try? JSONDecoder().decode([WindowPin].self, from: data) { pins = saved }
+        else { pins = (store.stringArray(forKey: Self.legacyPinsKey) ?? []).map(WindowPin.init(legacyID:)) }
     }
     func savePins() {
-        UserDefaults.standard.set(Array(pinnedIDs).sorted(), forKey: Self.pinsKey)
+        if let data = try? JSONEncoder().encode(pins) { UserDefaults.standard.set(data, forKey: Self.pinsKey) }
     }
     func togglePin(_ id: String) {
         guard showing, !state.isDemo, let item = state.items.first(where: { $0.id == id }), !item.descriptor.searchOnly else { return }
         let wasPinned = pinnedIDs.contains(id)
-        if wasPinned { pinnedIDs.remove(id) } else { pinnedIDs.insert(id) }
+        pins = wasPinned ? pins.filter { $0.id != id } : PinPolicy.adding(WindowPin(item.descriptor), to: pins)
+        pinnedIDs = PinPolicy.boundIDs(pins)
         savePins()
         state.pinnedIDs = pinnedIDs
         state.sticky = true; pendingCommit = false; pendingFocusID = nil
@@ -46,19 +51,23 @@ extension AppDelegate {
         state.refilter(reset: false)
         syncActivityTimers()
     }
-    /// Forgets pins only for windows the window server no longer knows, not ones a refresh missed.
-    func prunePins(validIDs: Set<String>) {
-        let missing = pinnedIDs.subtracting(validIDs)
-        guard !missing.isEmpty else { return }
-        let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
-        let alive = Set(info.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
-        let gone = missing.filter { id in
-            if id.hasPrefix("cg:"), let number = UInt32(id.dropFirst(3)) { return !alive.contains(number) }
-            if id.hasPrefix("app:"), let pid = Int32(id.dropFirst(4)) { return NSRunningApplication(processIdentifier: pid) == nil }
-            return true
+    /// Matches the saved pins to the windows of a fresh read. A pin is forgotten only when the window server
+    /// no longer knows its window, not when a refresh missed it.
+    func syncPins(_ handles: [WindowHandle]) {
+        guard !pins.isEmpty else { return }
+        let windows = handles.map(\.descriptor), ids = Set(windows.map(\.id))
+        var liveWindowIDs = Set<UInt32>(), runningApps: [Int32: String] = [:]
+        if pins.contains(where: { !ids.contains($0.id) }) {
+            let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+            liveWindowIDs = Set(info.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
+            for app in NSWorkspace.shared.runningApplications where !app.isTerminated {
+                runningApps[app.processIdentifier] = app.bundleIdentifier ?? ""
+            }
         }
-        guard !gone.isEmpty else { return }
-        pinnedIDs.subtract(gone); savePins(); state.pinnedIDs = pinnedIDs
+        let resolved = PinPolicy.resolve(pins, windows: windows, runningApps: runningApps, liveWindowIDs: liveWindowIDs)
+        if resolved != pins { pins = resolved; savePins() }
+        pinnedIDs = PinPolicy.boundIDs(pins)
+        state.pinnedIDs = pinnedIDs
     }
 
     // MARK: Dropping files on a card
@@ -110,6 +119,26 @@ extension AppDelegate {
             guard let self, self.showing, self.showGeneration == generation else { return }
             self.browserTabResults = tabs
             self.updateExtraItems()
+        }
+    }
+    /// The panel stays until the browser has answered, so a tab that cannot be reached can say why, like any
+    /// other window that cannot be switched to.
+    func focusBrowserTab(_ selected: WindowHandle) {
+        guard !state.actionPending else { return }
+        state.actionPending = true
+        let generation = showGeneration
+        WindowControl.focusBrowserTab(selected) { [weak self] error in
+            guard let self else { return }
+            let open = self.showing && self.showGeneration == generation
+            if open { self.state.actionPending = false }
+            guard let error else {
+                if open { self.dismiss() }
+                self.engine.markFocused(selected)
+                return
+            }
+            guard open else { return }
+            self.pendingCommit = false; self.state.sticky = true; self.state.setMessage(error, error: true); self.relayout()
+            self.panel.makeKeyAndOrderFront(nil)
         }
     }
     /// Search-only results: browser tabs and menu bar icons.

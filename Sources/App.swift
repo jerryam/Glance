@@ -42,6 +42,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panelRefreshTimer: Timer?
     var releaseTimer: Timer?
     var refreshDebounce: DispatchWorkItem?
+    var idleRefresh: DispatchWorkItem?
+    var idleRefreshedAt: TimeInterval = -1_000
+    var idleRefreshCount = 0
+    /// The selection made from the cached list, while nothing but the trigger has moved it.
+    var cachedPickID: String?
+    var settingsSetAside = false
+    var settingsWasKey = false
     var supportObservers: [NSObjectProtocol] = []
     var previousModifiers: ShortcutModifiers = []
     var modifierRepeat: Timer?
@@ -62,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var screen: NSScreen?
     /// nil until first applied, so launch always puts the system ⌘Tab into a known state.
     var nativeSwitcherDisabled: Bool?
+    var pins: [WindowPin] = []
     var pinnedIDs = Set<String>()
     var badgesReadAt: TimeInterval = -1_000
     var browserTabsLoadedFor = -1
@@ -161,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         engine.onForegroundChange = { [weak self] in self?.updateHotkeyGate() }
         engine.onWindowsChange = { [weak self] in self?.schedulePanelRefresh() }
+        engine.onCacheStale = { [weak self] in self?.scheduleIdleRefresh() }
         engine.onTitleChange = { [weak self] id, title in self?.updateTitle(id, title: title) }
         gestures.onGesture = { [weak self] result in self?.handleGesture(result) ?? false }
         settings.onChange = { [weak self] in self?.applySettings() }
@@ -195,7 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }; self.sleeping = false; self.engine.refreshObservers(); self.updateHotkeyGate(); self.syncActivityTimers()
         })
         syncActivityTimers()
-        if AXIsProcessTrusted() { engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { _ in } }
+        if AXIsProcessTrusted() { engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in self?.syncPins(handles) } }
         // Someone upgrading has clearly used the switcher already; only a fresh install gets the guide.
         if settings.hadSavedSettings { OnboardingProgress.shared.markTried() }
         let firstRun = !OnboardingProgress.shared.tried
@@ -219,7 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !showing && settingsWindow?.isVisible != true { openSettings() }
+        guard !showing else { return true }
+        // Opening 一瞥 again also finds a settings window that a switch left behind other windows.
+        if settingsWindow?.isVisible == true { settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        else { openSettings() }
         return true
     }
 
@@ -328,6 +340,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         refreshDebounce = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
+    /// Keeps the cached list current while the panel is closed, so the next ⌥Tab starts from the windows
+    /// that really exist. Only window and app events start it; there is no timer.
+    func scheduleIdleRefresh() {
+        guard !showing, !sleeping, AXIsProcessTrusted() else { return }
+        idleRefresh?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.showing, !self.sleeping else { return }
+            self.idleRefreshedAt = ProcessInfo.processInfo.systemUptime
+            self.idleRefreshCount += 1
+            self.engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in self?.syncPins(handles) }
+        }
+        idleRefresh = work
+        // Soon after the event, but at most once a second for an app that keeps opening windows.
+        let sinceLast = ProcessInfo.processInfo.systemUptime - idleRefreshedAt
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.25, 1 - sinceLast), execute: work)
+    }
     /// A title change only updates that entry; it no longer re-reads every window of every app.
     func updateTitle(_ id: String, title: String) {
         guard showing, !state.isDemo, let index = state.all.firstIndex(where: { $0.id == id }) else { return }
@@ -391,7 +419,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = main
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "一瞥")
-        status.button?.toolTip = "一瞥 · 窗口切换与搜索"
         status.button?.setAccessibilityLabel("一瞥")
         let menu = NSMenu()
         menu.addItem(item("切换窗口", #selector(showAll)))
@@ -425,14 +452,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func showStatusMenu() {
         // The menu bar commands lead the menu while some icons are hidden.
         statusMenu.items.filter { $0.tag == 900 }.forEach { statusMenu.removeItem($0) }
+        var entries: [NSMenuItem] = []
+        if !hotkeys.errors.isEmpty { entries += [item("部分快捷键冲突，查看设置…", #selector(openSettings)), NSMenuItem.separator()] }
         if menuBar.handlesIconClick {
             let shown = menuBar.reveal != .none
-            let entries = [item(shown ? "收起菜单栏图标" : "显示隐藏的菜单栏图标", #selector(toggleMenuBarIcons)),
-                           item("显示全部菜单栏图标", #selector(showAllMenuBarIcons)),
-                           item("菜单栏图标设置…", #selector(openMenuBarSettings)), NSMenuItem.separator()]
-            for (offset, entry) in entries.enumerated() { entry.tag = 900; statusMenu.insertItem(entry, at: offset) }
-            entries[1].isEnabled = menuBar.reveal != .all
+            let showAll = item("显示全部菜单栏图标", #selector(showAllMenuBarIcons))
+            showAll.isEnabled = menuBar.reveal != .all
+            entries += [item(shown ? "收起菜单栏图标" : "显示隐藏的菜单栏图标", #selector(toggleMenuBarIcons)), showAll,
+                        item("菜单栏图标设置…", #selector(openMenuBarSettings)), NSMenuItem.separator()]
         }
+        for (offset, entry) in entries.enumerated() { entry.tag = 900; statusMenu.insertItem(entry, at: offset) }
         status.menu = statusMenu
         status.button?.performClick(nil)
         status.menu = nil
@@ -443,14 +472,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         openSettings()
         settingsModel?.selectedTab = SettingsSection.menuBar.rawValue
     }
-    /// The 一瞥 icon looks pressed while hidden menu bar icons are showing.
+    /// The 一瞥 icon looks pressed while hidden menu bar icons are showing. Its hint goes only to VoiceOver:
+    /// as a tooltip it was seen in the middle of a full-screen game, far from the icon.
     func updateStatusButton() {
         status?.button?.highlight(menuBar.reveal != .none)
         let tip: String
         if !hotkeys.errors.isEmpty { tip = "一瞥 · 部分快捷键冲突，请在设置中查看" }
         else if menuBar.handlesIconClick { tip = "一瞥 · 点按显示隐藏的菜单栏图标，按住 ⌥ 显示全部，右键打开菜单" }
         else { tip = "一瞥 · 窗口切换与搜索" }
-        status?.button?.toolTip = tip
+        status?.button?.setAccessibilityHelp(tip)
     }
     func item(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
         let result = NSMenuItem(title: title, action: selector, keyEquivalent: key); result.target = self; return result
@@ -502,7 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let profile = settings.value.advanced.independentGesture ?? settings.value.shortcuts.first(where: { $0.id == index }) else { gestureActive = false; return false }
             OnboardingProgress.shared.markTried()
             show(profile: profile, initialStep: step)
-        case .move(let step): if gestureActive && showing { if state.loading && state.items.isEmpty { initialStep += step } else { state.move(step) } }
+        case .move(let step): if gestureActive && showing { stepFromTrigger(step) }
         case .end: break
         }
         return gestureActive
@@ -514,8 +544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if showing && state.profile.id == index && !state.isDemo {
             pendingCommit = PendingReleasePolicy.keepPendingCommit(previous: pendingCommit, triggerPressed: true, triggerHeld: true)
             pendingFocusID = nil
-            if state.loading && state.items.isEmpty { initialStep += reverse ? -1 : 1 }
-            else { state.move(reverse ? -1 : 1) }
+            stepFromTrigger(reverse ? -1 : 1)
             return
         }
         show(profile: profile, initialStep: reverse ? -1 : 1)
@@ -523,6 +552,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if profile.keyCode == KeyChoice.modifierOnly {
             startModifierRepeat(command: reverse ? .previous : .next, flags: previousModifiers)
         }
+    }
+    /// One more press of the trigger, or a gesture step, while the panel is open.
+    func stepFromTrigger(_ step: Int) {
+        if state.loading && state.items.isEmpty { initialStep += step; return }
+        // Still on the cached list: count the step, so the fresh list can place the selection again.
+        let untouched = state.loading && cachedPickID != nil && state.selected?.id == cachedPickID
+        state.move(step)
+        if untouched { initialStep += step; cachedPickID = state.selected?.id }
     }
     @objc func showAll() {
         var profile = settings.value.shortcuts[0]; profile.scope = .all; profile.keepOpen = true; profile.release = .hold
@@ -534,8 +571,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func show(profile: ShortcutProfile, initialStep: Int, startSearching: Bool = false) {
         showStarted = ProcessInfo.processInfo.systemUptime; firstPreviewRecorded = false
+        idleRefresh?.cancel(); idleRefresh = nil
         capture.cancel(); previewPanel?.orderOut(nil); dockPreview.hide(reason: "switcher")
-        settingsWindow?.orderOut(nil)
+        setSettingsAside()
         state.frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         state.cursor = CGEvent(source: nil)?.location
         screen = preferredScreen(frontPID: state.frontPID)
@@ -559,6 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.loading = true; state.refilter(reset: true)
         let usedCache = !state.items.isEmpty
         if usedCache && !startSearching { state.selectedIndex = WindowNavigation.linear(index: 0, count: state.items.count, step: initialStep) }
+        cachedPickID = usedCache && !startSearching ? state.selected?.id : nil
         if usedCache { RuntimeDiagnostics.shared.record("list_cached", since: showStarted) }
         pendingCommit = false; pendingFocusID = nil; self.initialStep = initialStep; showing = true; engine.suspendTracking = true
         showGeneration += 1; let generation = showGeneration
@@ -576,12 +615,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         engine.refresh(frontPID: state.frontPID) { [weak self] handles in
             guard let self, self.showing, self.showGeneration == generation, !self.state.isDemo else { return }
-            let intendedID = self.pendingFocusID
-            self.prunePins(validIDs: Set(handles.map(\.id)))
+            var intendedID = self.pendingFocusID
+            let selectedBefore = self.state.selected?.id
+            self.syncPins(handles)
             self.state.all = handles; self.state.loading = false; self.state.refilter(reset: !usedCache && self.state.query.isEmpty)
             if !usedCache && !self.state.items.isEmpty && !self.state.searchVisible && self.state.query.isEmpty {
                 self.state.selectedIndex = (self.initialStep % self.state.items.count + self.state.items.count) % self.state.items.count
             }
+            if let index = CachedPickPolicy.freshIndex(pickedID: self.cachedPickID, selectedID: selectedBefore,
+                searching: self.state.searchVisible || !self.state.query.isEmpty, steps: self.initialStep, count: self.state.items.count) {
+                self.state.selectedIndex = index
+                if intendedID == selectedBefore { intendedID = self.state.selected?.id }
+            }
+            self.cachedPickID = nil
             RuntimeDiagnostics.shared.record("list_fresh", since: self.showStarted)
             self.state.retainPreviews(Set(handles.map(\.id)))
             if self.pendingCommit {
@@ -613,7 +659,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         "pendingCommit": pendingCommit, "sticky": state.sticky, "searching": state.searchVisible,
                         "requiredModifiers": state.profile.modifiers.rawValue, "currentModifiers": ShortcutModifiers(eventFlags: Self.logicalModifierFlags).rawValue],
          "windowObservers": engine.observedWindowCount, "windowEventCounts": engine.observerEventCounts,
-         "windowDiscovery": ["suppressedSurfaces": engine.suppressedSurfaceCount, "unavailableWindowLists": engine.unavailableWindowListCount],
+         "windowDiscovery": ["suppressedSurfaces": engine.suppressedSurfaceCount, "unavailableWindowLists": engine.unavailableWindowListCount,
+                             "lateScans": engine.lateScanCount, "idleRefreshes": idleRefreshCount],
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
     }
@@ -631,12 +678,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if let frontPID, AXIsProcessTrusted() {
             let app = AXUIElementCreateApplication(frontPID); AXUIElementSetMessagingTimeout(app, 0.12)
-            if let value = axAttribute(app, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID(), let rect = axFrame(value as! AXUIElement) {
-                return screens.max { a, b in
-                    let ai = (a.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-                    let bi = (b.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-                    let ar = CGDisplayBounds(ai).intersection(rect), br = CGDisplayBounds(bi).intersection(rect)
-                    return max(0, ar.width) * max(0, ar.height) < max(0, br.width) * max(0, br.height)
+            if let value = axAttribute(app, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() {
+                AXUIElementSetMessagingTimeout(value as! AXUIElement, 0.12)
+                if let rect = axFrame(value as! AXUIElement) {
+                    return screens.max { a, b in
+                        let ai = (a.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+                        let bi = (b.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+                        let ar = CGDisplayBounds(ai).intersection(rect), br = CGDisplayBounds(bi).intersection(rect)
+                        return max(0, ar.width) * max(0, ar.height) < max(0, br.width) * max(0, br.height)
+                    }
                 }
             }
         }
@@ -767,7 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .confirm: confirm()
         case .cancel:
             // Esc first folds an expanded app back into its group, then closes the panel.
-            if state.expandedApp != nil { collapseExpandedApp() } else { dismiss() }
+            if state.expandedApp != nil { collapseExpandedApp() } else { dismiss(cancelled: true) }
         case .next: state.move(1)
         case .previous: state.move(-1)
         case .search: beginSearch()
@@ -817,7 +867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard showing else { return }
         if state.loading { pendingCommit = true; pendingFocusID = state.selected?.id; return }
         guard let selected = state.selected else {
-            if !state.sticky && !state.searchVisible { dismiss() }
+            if !state.sticky && !state.searchVisible { dismiss(cancelled: true) }
             return
         }
         if state.isDemo { dismiss(); return }
@@ -834,6 +884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if !AXIsProcessTrusted() && selected.browserTab == nil { state.setMessage("请先开启辅助功能权限。", error: true); state.sticky = true; relayout(); return }
+        if selected.browserTab != nil { focusBrowserTab(selected); return }
         if let error = WindowControl.perform(.focus, on: selected) {
             pendingCommit = false; state.sticky = true; state.setMessage(error, error: true); relayout()
             panel.makeKeyAndOrderFront(nil); return
@@ -848,7 +899,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
     }
-    func dismiss() {
+    /// A settings window hidden for the panel is otherwise lost: 一瞥 does not list its own windows.
+    func setSettingsAside() {
+        guard let window = settingsWindow, window.isVisible else { return }
+        settingsSetAside = true; settingsWasKey = window.isKeyWindow
+        window.orderOut(nil)
+    }
+    func returnSettings(cancelled: Bool) {
+        guard settingsSetAside, let window = settingsWindow else { return }
+        settingsSetAside = false
+        if SettingsReturnPolicy.comesToFront(wasKey: settingsWasKey, cancelled: cancelled, demo: state.isDemo) {
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        } else { window.orderBack(nil) }
+    }
+    func dismiss(cancelled: Bool = false) {
         showing = false; pendingCommit = false; pendingFocusID = nil; gestureActive = false; heldTriggerModifiers = []
         showGeneration += 1; let generation = showGeneration
         stopModifierRepeat(); refreshDebounce?.cancel(); refreshDebounce = nil
@@ -861,6 +925,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else { panel.orderOut(nil) }
         previewPanel?.orderOut(nil); capture.cancel(); engine.suspendTracking = false
         state.zoomImage = nil; state.extraItems = []; state.expandedApp = nil; state.dropTargetID = nil
+        returnSettings(cancelled: cancelled)
         updateHotkeyGate()
         syncActivityTimers()
     }
@@ -906,8 +971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         engine.refresh(frontPID: state.frontPID) { [weak self] handles in
             guard let self, self.showing, self.showGeneration == generation else { return }
             self.panelRefreshing = false
-            let previous = self.state.all.map(\.descriptor)
-            guard previous != handles.map(\.descriptor) else { return }
+            guard WindowListChange.matters(from: self.state.all.map(\.descriptor), to: handles.map(\.descriptor)) else { return }
             let oldIDs = Set(self.state.all.map(\.id)), ids = Set(handles.map(\.id))
             self.state.all = handles; self.state.refilter(reset: false)
             self.state.retainPreviews(ids)
@@ -1002,7 +1066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func showDemo() {
         capture.cancel(); previewPanel?.orderOut(nil)
-        settingsWindow?.orderOut(nil)
+        setSettingsAside()
         screen = NSScreen.main; state.profile = ShortcutProfile.defaults()[2]; state.settings = settings.value
         state.style = settings.value.style; state.frontPID = nil; state.displayID = nil; state.loading = false
         state.searchVisible = false
@@ -1046,6 +1110,10 @@ struct GlanceEntry {
     static func main() {
         if WindowCommandServer.runClientIfRequested() { return }
         if WindowCommandServer.handOffToExistingInstance() { return }
+        SystemSwitcherGuard.install()
+        // An element read from another one does not inherit its timeout. Without a global one it waits about
+        // six seconds on a hung app, on the main thread for most of the calls made while switching.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate

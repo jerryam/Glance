@@ -34,6 +34,9 @@ struct BrowserTabRef {
     /// 1-based, as the browsers' scripting interfaces count tabs.
     let tabIndex: Int
     let chromium: Bool
+    /// What the tab showed when it was listed, to tell whether it is still at that position.
+    let url: String
+    let title: String
 }
 
 /// Lists and activates Safari / Chromium tabs through Automation (osascript, JavaScript flavour).
@@ -72,7 +75,8 @@ enum BrowserTabs {
                                                           onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
                         descriptor.browserTab = true
                         descriptor.subtitle = URL(string: address)?.host ?? address
-                        let reference = BrowserTabRef(bundleID: item.browser.bundleID, windowID: window.id, tabIndex: offset + 1, chromium: item.browser.chromium)
+                        let reference = BrowserTabRef(bundleID: item.browser.bundleID, windowID: window.id, tabIndex: offset + 1, chromium: item.browser.chromium,
+                                                      url: address, title: title ?? "")
                         handles.append(WindowHandle(descriptor: descriptor, ax: nil, icon: item.icon, browserTab: reference))
                     }
                 }
@@ -80,20 +84,34 @@ enum BrowserTabs {
             DispatchQueue.main.async { completion(handles) }
         }
     }
-    static func activate(_ tab: BrowserTabRef) {
-        // Only integers are interpolated into the script; tab titles never are.
-        let select = tab.chromium ? "w.activeTabIndex = \(tab.tabIndex);" : "w.currentTab = w.tabs[\(tab.tabIndex - 1)];"
+    /// Tabs may have moved since they were listed: the listed position counts only if it still shows that
+    /// address, then the address is looked up, then the title. Reports on the main queue whether the tab is in front.
+    static func activate(_ tab: BrowserTabRef, completion: @escaping (Bool) -> Void) {
+        // Integers go into the script as they are; a tab's address and title only as JSON strings.
+        guard let url = BrowserTabScript.literal(tab.url), let title = BrowserTabScript.literal(tab.title) else { completion(false); return }
+        let titles = tab.chromium ? "w.tabs.title()" : "w.tabs.name()"
+        let select = tab.chromium ? "w.activeTabIndex = index + 1;" : "w.currentTab = w.tabs[index];"
         let script = """
         (() => {
           const app = Application('\(tab.bundleID)');
           const w = app.windows.byId(\(tab.windowID));
+          const urls = w.tabs.url().map(u => u || '');
+          let index = \(tab.tabIndex - 1);
+          if (urls[index] !== \(url)) {
+            index = urls.indexOf(\(url));
+            if (index < 0 && \(title) !== '') index = \(titles).indexOf(\(title));
+            if (index < 0) return 'gone';
+          }
           \(select)
           w.index = 1;
           app.activate();
           return 'ok';
         })()
         """
-        queue.async { _ = runScript(script) }
+        queue.async {
+            let answer = runScript(script, timeout: 5)
+            DispatchQueue.main.async { completion(answer == "ok") }
+        }
     }
     private static func listScript(_ browser: Browser) -> String {
         let active = browser.chromium ? "w.activeTabIndex()" : "w.currentTab.index()"

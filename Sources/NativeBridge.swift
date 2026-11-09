@@ -2,6 +2,30 @@ import AppKit
 import ApplicationServices
 import Darwin
 
+private typealias SymbolicHotKeySetter = @convention(c) (UInt32, Bool) -> Int32
+// Looked up ahead of time: a signal handler must not look anything up.
+private var symbolicHotKeySetter: SymbolicHotKeySetter?
+private var systemSwitcherIsOff = false
+
+/// Hands the system ⌘Tab back when the process dies without reaching applicationWillTerminate: a crash, `kill`
+/// or Ctrl-C. SIGKILL cannot be caught; the next launch of 一瞥 corrects the state then.
+enum SystemSwitcherGuard {
+    static func install() {
+        for number in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
+            signal(number) { received in
+                // Whatever goes wrong from here on, including a hung call, ends the process the ordinary way.
+                signal(received, SIG_DFL)
+                alarm(2)
+                if systemSwitcherIsOff, let setter = symbolicHotKeySetter {
+                    _ = setter(1, true)
+                    _ = setter(2, true)
+                }
+                raise(received)
+            }
+        }
+    }
+}
+
 // Resolve optional system interfaces at runtime so a missing symbol has a public-API fallback.
 enum NativeBridge {
     private static let accessibility = dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices", RTLD_LAZY)
@@ -78,8 +102,9 @@ enum NativeBridge {
     /// Turns the system ⌘Tab / ⌘⇧Tab switcher off or on. The state outlives this process, so it must be
     /// restored when 一瞥 quits or stops using ⌘Tab.
     static func setSystemAppSwitcher(enabled: Bool) {
-        typealias SetEnabled = @convention(c) (UInt32, Bool) -> Int32
-        guard let function = symbol(skyLight, "CGSSetSymbolicHotKeyEnabled", as: SetEnabled.self) else { return }
+        guard let function = symbol(skyLight, "CGSSetSymbolicHotKeyEnabled", as: SymbolicHotKeySetter.self) else { return }
+        symbolicHotKeySetter = function
+        systemSwitcherIsOff = !enabled
         _ = function(1, enabled)
         _ = function(2, enabled)
     }

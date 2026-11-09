@@ -28,7 +28,9 @@ final class SettingsStore: ObservableObject {
         } else {
             store.set(data, forKey: Self.backupKey); keepsLoadBackup = true
             value = .defaults
-            loadNotice = "设置无法读取，暂时使用默认设置；原配置已备份，可在 通用 › 备份与迁移 中恢复。"
+            loadNotice = UserSettings.salvaged(from: data) == nil
+                ? "设置无法读取，已改用默认设置。原配置已损坏，无法恢复。"
+                : "部分设置无法读取，暂时使用默认设置；可在 通用 › 备份与迁移 中恢复还能读取的部分。"
         }
     }
     func save(_ settings: UserSettings) {
@@ -45,11 +47,12 @@ final class SettingsStore: ObservableObject {
         UserDefaults.standard.set(data, forKey: Self.backupKey)
     }
     private var keepsLoadBackup = false
-    /// The configuration from before the most recent editing session, or the original one that was repaired.
+    /// The configuration from before the most recent editing session, or the original one that was repaired
+    /// or could not be read as a whole.
     func backup() -> UserSettings? {
-        guard let data = UserDefaults.standard.data(forKey: Self.backupKey),
-              let settings = try? JSONDecoder().decode(UserSettings.self, from: data) else { return nil }
-        return settings.repaired()
+        guard let data = UserDefaults.standard.data(forKey: Self.backupKey) else { return nil }
+        let settings = (try? JSONDecoder().decode(UserSettings.self, from: data)) ?? UserSettings.salvaged(from: data)
+        return settings?.repaired()
     }
 }
 
@@ -112,11 +115,17 @@ final class WindowEngine: ObservableObject {
     private(set) var observerEventCounts: [String: Int] = [:]
     private(set) var suppressedSurfaceCount = 0
     private(set) var unavailableWindowListCount = 0
+    private(set) var lateScanCount = 0
+    /// How long one refresh waits for every app. A hung app answers "cannot complete" within its own 0.2 second
+    /// timeout, so this only cuts off an app that answers each call slowly.
+    private static let scanDeadline: TimeInterval = 0.3
     private var workspaceObservers: [NSObjectProtocol] = []
     private var lastForeground = ""
     private var focusDebounce: DispatchWorkItem?
     var onForegroundChange: (() -> Void)?
     var onWindowsChange: (() -> Void)?
+    /// The cached list may be behind: a window or app appeared, the Space changed, or the focused window is not in it.
+    var onCacheStale: (() -> Void)?
     /// (window id, new title) for a title change that did not need a full re-read.
     var onTitleChange: ((String, String) -> Void)?
     /// Scanning every window for tab groups costs dozens of accessibility calls; only done when a
@@ -141,7 +150,7 @@ final class WindowEngine: ObservableObject {
                      NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
             workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.watchApplications(); self?.trackFocus(); self?.onWindowsChange?()
+                self?.watchApplications(); self?.trackFocus(); self?.onWindowsChange?(); self?.onCacheStale?()
             })
         }
         watchApplications()
@@ -186,6 +195,8 @@ final class WindowEngine: ObservableObject {
         let work = DispatchWorkItem { [weak self] in self?.trackFocus() }
         focusDebounce = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
         onWindowsChange?()
+        if notification == kAXWindowCreatedNotification || notification == kAXWindowMiniaturizedNotification
+            || notification == kAXWindowDeminiaturizedNotification { onCacheStale?() }
     }
     private func watchApplications() {
         guard AXIsProcessTrusted() else { return }
@@ -224,6 +235,7 @@ final class WindowEngine: ObservableObject {
         guard rules.contains(where: { $0.ignore == .fullscreen }), AXIsProcessTrusted() else { return false }
         let ax = AXUIElementCreateApplication(app.processIdentifier); AXUIElementSetMessagingTimeout(ax, 0.10)
         guard let focused = axAttribute(ax, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        AXUIElementSetMessagingTimeout(focused as! AXUIElement, 0.10)
         return (axAttribute(focused as! AXUIElement, "AXFullScreen") as? NSNumber)?.boolValue == true
     }
     private func trackFocus() {
@@ -236,8 +248,9 @@ final class WindowEngine: ObservableObject {
             if foreground != lastForeground { lastForeground = foreground; onForegroundChange?() }
             return
         }
-        let title = axAttribute(focused as! AXUIElement, kAXTitleAttribute) as? String ?? ""
         let window = focused as! AXUIElement
+        AXUIElementSetMessagingTimeout(window, 0.15)
+        let title = axAttribute(window, kAXTitleAttribute) as? String ?? ""
         watchWindow(window, pid: app.processIdentifier)
         let key = NativeBridge.windowID(window).map { "cg:\($0)" } ?? "\(app.processIdentifier)|\(title)"
         let full = (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false
@@ -248,6 +261,8 @@ final class WindowEngine: ObservableObject {
         guard key != lastTracked else { return }
         lastTracked = key
         focusHistory[key] = Date.timeIntervalSinceReferenceDate
+        // Focus landed on a window the list has never seen, whichever event was missed.
+        if key.hasPrefix("cg:"), !windows.contains(where: { $0.id == key }) { onCacheStale?() }
     }
     func refresh(frontPID: Int32?, completion: @escaping ([WindowHandle]) -> Void) {
         let request = refreshRequests.append(completion)
@@ -265,6 +280,19 @@ final class WindowEngine: ObservableObject {
             return WindowHandle(descriptor: descriptor, ax: handle.ax, icon: handle.icon, tab: handle.tab)
         }
     }
+    /// The answer of an app that missed the deadline. The next refresh starts from it, and an open panel
+    /// hears about it only when the app's windows really changed, so a slow app cannot keep it refreshing.
+    private func adoptLateScan(pid: Int32, handles: [WindowHandle]) {
+        lateScanCount += 1
+        guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        let before = Set(windows.filter { $0.descriptor.pid == pid }.map(\.id))
+        windows = windows.filter { $0.descriptor.pid != pid } + handles
+        for handle in handles {
+            if firstSeen[handle.id] == nil { firstSeen[handle.id] = handle.descriptor.created }
+            if let ax = handle.ax { watchWindow(ax, pid: pid) }
+        }
+        if before != Set(handles.map(\.id)) { onWindowsChange?() }
+    }
     private func enumerate(frontPID: Int32?, request: Int) {
         let start = ProcessInfo.processInfo.systemUptime
         refreshing = true
@@ -277,7 +305,7 @@ final class WindowEngine: ObservableObject {
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return (id.uint32Value, CGDisplayBounds(id.uint32Value))
         }
-        let history = focusHistory, activated = appHistory, firstSeen = self.firstSeen, scanTabs = self.scanTabs
+        let history = focusHistory, activated = appHistory, firstSeen = self.firstSeen, scanTabs = self.scanTabs, known = windows
         worker.async { [weak self] in
             let dictionaries = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
             let entries: [CGEntry] = dictionaries.compactMap { d in
@@ -305,8 +333,8 @@ final class WindowEngine: ObservableObject {
                 d.zOrder = d.windowID.flatMap { cgOrder[$0] } ?? Int.max
                 return d
             }
-            // Each app is read on its own thread, so one slow or hung app no longer delays all the others.
-            struct AppScan { var handles: [WindowHandle] = []; var currentID: String?; var suppressed = 0; var unavailable = 0 }
+            // Each app is read on its own thread, and the wait for them all ends at the deadline below.
+            struct AppScan { var handles: [WindowHandle] = []; var currentID: String?; var suppressed = 0; var unavailable = 0; var timedOut = false }
             func scan(_ app: RunningAppInfo) -> AppScan {
                 var result = AppScan()
                 let cgWindows = entries.filter { $0.pid == app.pid }
@@ -316,6 +344,7 @@ final class WindowEngine: ObservableObject {
                 let windowStatus = trusted ? AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windowValue) : .apiDisabled
                 let windowListAvailable = windowStatus == .success && windowValue is [AXUIElement]
                 if trusted && !windowListAvailable { result.unavailable += 1 }
+                if windowStatus == .cannotComplete { result.timedOut = true; return result }
                 var axWindows = windowValue as? [AXUIElement] ?? []
                 let focused = trusted ? axAttribute(appAX, kAXFocusedWindowAttribute) : nil
                 if let focused, CFGetTypeID(focused) == AXUIElementGetTypeID(), !axWindows.contains(where: { CFEqual($0, focused) }) {
@@ -378,12 +407,37 @@ final class WindowEngine: ObservableObject {
                 }
                 return result
             }
-            var scans = [AppScan](repeating: AppScan(), count: apps.count)
-            scans.withUnsafeMutableBufferPointer { buffer in
-                let slots = buffer
-                DispatchQueue.concurrentPerform(iterations: apps.count) { index in slots[index] = scan(apps[index]) }
+            // The last known windows, for an app that did not answer: it should not vanish from the list while it is busy.
+            func lastKnown(_ app: RunningAppInfo) -> AppScan {
+                let live = Set(cgOrder.keys)
+                var result = AppScan()
+                result.unavailable = 1
+                result.handles = known.filter { handle in
+                    handle.descriptor.pid == app.pid && WindowDiscoveryPolicy.keepsUnanswered(windowID: handle.descriptor.windowID, liveWindowIDs: live)
+                }.map { handle in
+                    var d = handle.descriptor
+                    d.hidden = app.hidden
+                    d.lastFocused = max(d.lastFocused, history[d.id] ?? 0, history["\(d.pid)|\(d.title)"] ?? 0)
+                    return handle.with(d)
+                }
+                return result
             }
-            for scanned in scans {
+            let slots = DeadlineSlots<AppScan>(count: apps.count)
+            let finished = DispatchGroup()
+            finished.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                DispatchQueue.concurrentPerform(iterations: apps.count) { index in
+                    let scanned = scan(apps[index])
+                    if !slots.store(scanned, at: index) && !scanned.timedOut {
+                        DispatchQueue.main.async { [weak self] in self?.adoptLateScan(pid: apps[index].pid, handles: scanned.handles) }
+                    }
+                }
+                finished.leave()
+            }
+            _ = finished.wait(timeout: .now() + Self.scanDeadline)
+            let answers = slots.close()
+            for (index, app) in apps.enumerated() {
+                let scanned = answers[index].flatMap { $0.timedOut ? nil : $0 } ?? lastKnown(app)
                 handles += scanned.handles
                 if currentID == nil { currentID = scanned.currentID }
                 suppressedSurfaces += scanned.suppressed; unavailableWindowLists += scanned.unavailable
@@ -578,16 +632,22 @@ enum WindowControl {
         let matches = windows.filter { (axAttribute($0, kAXTitleAttribute) as? String) == handle.descriptor.title }
         return matches.count == 1 ? matches[0] : nil
     }
+    /// A browser switches tabs in a script that runs in another process, so the answer arrives later: nil when
+    /// the tab is in front, otherwise what to tell the user. Always on the main queue.
+    static func focusBrowserTab(_ handle: WindowHandle, completion: @escaping (String?) -> Void) {
+        guard let tab = handle.browserTab, let app = NSRunningApplication(processIdentifier: handle.descriptor.pid) else {
+            completion("这个窗口已经关闭。"); return
+        }
+        app.unhide()
+        BrowserTabs.activate(tab) { switched in
+            completion(switched ? nil : "无法切换到这个标签页：它可能已经关闭，或浏览器没有回应。可以重新搜索后再试。")
+        }
+    }
     static func perform(_ action: WindowAction, on handle: WindowHandle) -> String? {
         guard let app = NSRunningApplication(processIdentifier: handle.descriptor.pid) else { return "这个窗口已经关闭。" }
         if action == .quitApp { return app.terminate() ? nil : "应用未接受退出请求，请在应用中确认未保存的内容。" }
         if action == .hideApp { return (app.isHidden ? app.unhide() : app.hide()) ? nil : "应用没有接受隐藏或显示请求。" }
-        if let browserTab = handle.browserTab {
-            guard action == .focus else { return "浏览器标签页请先切换过去，再在浏览器里操作。" }
-            app.unhide()
-            BrowserTabs.activate(browserTab)
-            return nil
-        }
+        if handle.browserTab != nil { return "浏览器标签页请先切换过去，再在浏览器里操作。" }
         guard AXIsProcessTrusted() else { return "请先为“一瞥”开启辅助功能权限。" }
         let ax = element(for: handle)
         if let ax { AXUIElementSetMessagingTimeout(ax, 0.15) }
