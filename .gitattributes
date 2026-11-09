@@ -1,0 +1,2 @@
+# zsh cannot run a script with CRLF line endings, so every text file stays LF on every machine.
+* text=auto eol=lf

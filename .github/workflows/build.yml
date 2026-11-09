@@ -1,0 +1,63 @@
+name: Build
+
+# Compiles 一瞥 and runs Tests/CoreTests.swift on a real Mac, so a change made on a machine without
+# Xcode still gets built. It needs no secrets: build.sh signs ad hoc when the local certificate is absent.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push replaces the build still running for the same branch, so it is not billed twice.
+concurrency:
+  group: build-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macOS 27 with Xcode 27, the closest match to the toolchain 一瞥 is really built with.
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show the toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          echo "SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          xcrun swiftc --version
+
+      # A commit from Windows drops these unless git records them, and the scripts then will not run on a Mac.
+      - name: Check executable bits
+        run: |
+          status=0
+          for file in build.sh build-and-log.command scripts/*; do
+            if ! test -x "$file"; then
+              echo "::error file=$file::not executable, run: git update-index --chmod=+x $file"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Build and run the core checks
+        run: ./build.sh
+
+      # build.sh only prints a note when the Liquid Glass icon fails to compile, and carries on.
+      - name: Check the Liquid Glass icon
+        run: test -f Glance.app/Contents/Resources/Assets.car
+
+      # The artifact's own zip drops executable bits and symlinks; ditto keeps them and the signature.
+      - name: Package the app
+        run: ditto -c -k --keepParent Glance.app Glance.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Glance-${{ github.sha }}
+          path: Glance.zip
+          retention-days: 7
