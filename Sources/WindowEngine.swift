@@ -128,6 +128,12 @@ final class WindowEngine: ObservableObject {
     private var queuedFrontPID: Int32?
     private var focusHistory: [String: TimeInterval] = [:]
     private var appHistory: [Int32: TimeInterval] = [:]
+    /// Each app's last use by identifier, which outlives the process ids in appHistory.
+    private var appRecent: [String: TimeInterval] = [:]
+    /// What is saved. Nil until restoreRecentOrder has run, and nothing is written before that.
+    private var savedRecent: RecentOrder?
+    private var recentSave: DispatchWorkItem?
+    private var restoredWindowCount = 0
     private var lastTracked = ""
     private var firstSeen: [String: TimeInterval] = [:]
     /// Subscribing to an app and reading its focused window can each wait for that app, and the app may not be
@@ -175,7 +181,10 @@ final class WindowEngine: ObservableObject {
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             if !self.suspendTracking && app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-                self.appHistory[app.processIdentifier] = Date.timeIntervalSinceReferenceDate
+                let now = Date.timeIntervalSinceReferenceDate
+                self.appHistory[app.processIdentifier] = now
+                if let bundle = app.bundleIdentifier { self.appRecent[bundle] = now }
+                self.noteRecentUse()
             }
             self.watchApplications()
             self.trackFocus()
@@ -376,6 +385,7 @@ final class WindowEngine: ObservableObject {
         guard key != lastTracked else { return }
         lastTracked = key
         focusHistory[key] = Date.timeIntervalSinceReferenceDate
+        noteRecentUse()
         // Focus landed on a window the list has never seen, whichever event was missed.
         if key.hasPrefix("cg:"), !windows.contains(where: { $0.id == key }) { markCacheStale() }
     }
@@ -425,7 +435,7 @@ final class WindowEngine: ObservableObject {
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return (id.uint32Value, CGDisplayBounds(id.uint32Value))
         }
-        let history = focusHistory, activated = appHistory, firstSeen = self.firstSeen, scanTabs = self.scanTabs, known = windows
+        let history = focusHistory, activated = appHistory, appTimes = appRecent, firstSeen = self.firstSeen, scanTabs = self.scanTabs, known = windows
         worker.async { [weak self] in
             let dictionaries = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
             let entries: [CGEntry] = dictionaries.compactMap { d in
@@ -448,7 +458,7 @@ final class WindowEngine: ObservableObject {
                 d.spaceKnown = !d.spaces.isEmpty
                 d.spaceNumbers = d.spaces.compactMap { spaces.numbers[$0] }
                 d.created = firstSeen[d.id] ?? Date.timeIntervalSinceReferenceDate
-                d.lastFocused = history[d.id] ?? history["\(d.pid)|\(d.title)"] ?? activated[d.pid] ?? 0
+                d.lastFocused = RecentOrderPolicy.lastFocused(d, focus: history, activated: activated, apps: appTimes)
                 d.controllable = ax != nil || d.windowless
                 d.zOrder = d.windowID.flatMap { cgOrder[$0] } ?? Int.max
                 return d
@@ -605,6 +615,43 @@ final class WindowEngine: ObservableObject {
     func markFocused(_ handle: WindowHandle) {
         let key = handle.id
         focusHistory[key] = Date.timeIntervalSinceReferenceDate; lastTracked = key
+        noteRecentUse()
+    }
+
+    // MARK: Recent order across restarts
+
+    /// Kept apart from the settings, so it is not part of a settings export.
+    static let recentOrderKey = "WindowHop.recentOrder.v1"
+    /// Once at launch, before the first read of the windows.
+    func restoreRecentOrder() {
+        let order = RecentOrderPolicy.decoded(UserDefaults.standard.data(forKey: Self.recentOrderKey))
+        let now = Date.timeIntervalSinceReferenceDate
+        var running: [Int32: String] = [:]
+        for app in NSWorkspace.shared.runningApplications where !app.isTerminated { running[app.processIdentifier] = app.bundleIdentifier ?? "" }
+        let focus = RecentOrderPolicy.restoredFocus(order, runningApps: running, now: now)
+        restoredWindowCount = focus.count
+        focusHistory.merge(focus) { current, _ in current }
+        appRecent.merge(RecentOrderPolicy.restoredApps(order, now: now)) { current, _ in current }
+        savedRecent = order
+    }
+    /// One timer at a time and none while nothing changes, so an idle 一瞥 stays idle.
+    private func noteRecentUse() {
+        guard savedRecent != nil, recentSave == nil else { return }
+        let work = DispatchWorkItem { [weak self] in self?.saveRecentOrder() }
+        recentSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + RecentOrderPolicy.saveDelay, execute: work)
+    }
+    func saveRecentOrder() {
+        recentSave?.cancel(); recentSave = nil
+        guard let previous = savedRecent else { return }
+        let order = RecentOrderPolicy.snapshot(focus: focusHistory, windows: windows.map(\.descriptor), apps: appRecent, previous: previous)
+        appRecent = order.apps
+        guard order != previous, let data = try? JSONEncoder().encode(order) else { return }
+        savedRecent = order
+        UserDefaults.standard.set(data, forKey: Self.recentOrderKey)
+    }
+    var recentOrderCounts: [String: Int] {
+        ["restoredWindows": restoredWindowCount, "savedWindows": savedRecent?.windows.count ?? 0, "savedApps": savedRecent?.apps.count ?? 0]
     }
 }
 

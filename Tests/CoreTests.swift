@@ -273,7 +273,72 @@ struct CoreTests {
         verifyThreading()
         verifyWindowShortcuts()
         verifySettingsEntry()
+        verifyRecentOrder()
         print("\(passed) checks passed")
+    }
+    static func verifyRecentOrder() {
+        func window(_ id: String, pid: Int32, bundle: String, title: String = "机密标题") -> WindowDescriptor {
+            WindowDescriptor(id: id, windowID: nil, pid: pid, appName: "应用", bundleID: bundle, title: title, minimized: false, hidden: false,
+                             onCurrentSpace: true, displayID: 1, aspectRatio: 1.6)
+        }
+        let safari = "com.apple.Safari", mail = "com.apple.mail"
+        let listed = [window("cg:10", pid: 100, bundle: safari), window("cg:20", pid: 200, bundle: mail),
+                      window("ax:100:7", pid: 100, bundle: safari), window("cg:30", pid: 100, bundle: safari)]
+        let focus = ["cg:10": 300.0, "cg:20": 400.0, "ax:100:7": 500.0, "100|机密标题": 600.0, "cg:99": 700.0]
+        let order = RecentOrderPolicy.snapshot(focus: focus, windows: listed, apps: [mail: 450, "com.apple.Notes": 50], previous: RecentOrder())
+        check(order.windows.map(\.id) == ["cg:20", "cg:10"], "只保存有窗口编号、用过而且还开着的窗口，最近的在前")
+        check(order.windows[0] == RecentOrder.WindowUse(id: "cg:20", pid: 200, bundleID: mail, time: 400), "记下进程和应用，重启后才能确认还是同一个窗口")
+        check(order.apps == [safari: 500, mail: 450, "com.apple.Notes": 50], "应用的时间取窗口和应用里最近的一次，没在运行的应用也留着")
+        let saved = try! JSONEncoder().encode(order)
+        check(!String(decoding: saved, as: UTF8.self).contains("机密"), "窗口标题不写进本机存储")
+        check(RecentOrderPolicy.decoded(saved) == order, "保存后读回来不变")
+        check(RecentOrderPolicy.decoded(Data("不是 JSON".utf8)) == RecentOrder() && RecentOrderPolicy.decoded(nil) == RecentOrder(), "读不出来时从空开始，不影响启动")
+        check(RecentOrderPolicy.snapshot(focus: [:], windows: [], apps: [:], previous: order).windows == order.windows, "还没读到窗口时不丢掉上次保存的窗口")
+        check(RecentOrderPolicy.snapshot(focus: [:], windows: listed, apps: [:], previous: order).windows.isEmpty, "读到窗口后，已经关闭的窗口不再保存")
+
+        let many = (0..<(RecentOrderPolicy.windowLimit + 5)).map { window("cg:\($0)", pid: 1, bundle: "app.\($0)") }
+        let manyFocus = Dictionary(uniqueKeysWithValues: many.enumerated().map { ($0.element.id, Double($0.offset + 1)) })
+        let capped = RecentOrderPolicy.snapshot(focus: manyFocus, windows: many, apps: [:], previous: RecentOrder())
+        check(capped.windows.count == RecentOrderPolicy.windowLimit && capped.windows.first?.id == many.last?.id && !capped.windows.contains(where: { $0.id == "cg:0" }), "窗口超过上限时留下最近用过的")
+        check(capped.apps.count == RecentOrderPolicy.appLimit && capped.apps["app.0"] == nil && capped.apps[many[many.count - 1].bundleID] != nil, "应用超过上限时留下最近用过的")
+        check(RecentOrderPolicy.snapshot(focus: ["cg:1": 5], windows: [window("cg:1", pid: 1, bundle: "")], apps: ["": 9, "zero": 0], previous: RecentOrder()).apps.isEmpty, "没有应用标识或没有时间的不保存")
+
+        let running: [Int32: String] = [100: safari, 200: mail]
+        let earlier = RecentOrder(windows: [
+            .init(id: "cg:10", pid: 100, bundleID: safari, time: 300),
+            .init(id: "cg:20", pid: 201, bundleID: mail, time: 400),
+            .init(id: "cg:21", pid: 200, bundleID: "com.apple.Notes", time: 410),
+            .init(id: "cg:22", pid: 999, bundleID: "gone", time: 420),
+            .init(id: "cg:23", pid: 100, bundleID: safari, time: 900),
+            .init(id: "cg:24", pid: 100, bundleID: safari, time: 0)], apps: [mail: 450, "": 460, "late": 900, "zero": 0])
+        check(RecentOrderPolicy.restoredFocus(earlier, runningApps: running, now: 500) == ["cg:10": 300, "cg:23": 500], "只认同一进程、同一应用的窗口；进程换了或编号被重用都不算；超前的时间不超过现在")
+        check(RecentOrderPolicy.restoredApps(earlier, now: 500) == [mail: 450, "late": 500], "应用时间同样不超过现在，无效的丢弃")
+
+        let known = window("cg:10", pid: 100, bundle: safari, title: "甲")
+        func used(focus: [String: Double] = [:], activated: [Int32: Double] = [:], apps: [String: Double] = [:]) -> Double {
+            RecentOrderPolicy.lastFocused(known, focus: focus, activated: activated, apps: apps)
+        }
+        check(used(focus: ["cg:10": 4, "100|甲": 3], activated: [100: 2], apps: [safari: 1]) == 4, "窗口自己的记录优先")
+        check(used(focus: ["100|甲": 3], activated: [100: 2], apps: [safari: 1]) == 3, "其次是按标题记下的这次运行里的记录")
+        check(used(activated: [100: 2], apps: [safari: 1]) == 2, "然后是应用这次运行里的激活时间")
+        check(used(apps: [safari: 1]) == 1, "最后是应用以前保存的时间")
+        check(used() == 0, "从没用过的排在最后")
+
+        let settings = UserSettings.defaults, profile = settings.shortcuts[0]
+        func relisted(_ windows: [WindowDescriptor], from before: RecentOrder, running: [Int32: String]) -> [String] {
+            let restored = RecentOrderPolicy.restoredFocus(before, runningApps: running, now: 1000), apps = RecentOrderPolicy.restoredApps(before, now: 1000)
+            let timed = windows.map { item -> WindowDescriptor in
+                var copy = item
+                copy.lastFocused = RecentOrderPolicy.lastFocused(item, focus: restored, activated: [:], apps: apps)
+                return copy
+            }
+            return WindowSearch.filtered(timed, settings: settings, profile: profile, frontPID: nil, displayID: 1, query: "").map(\.id)
+        }
+        let current = [window("cg:1", pid: 1, bundle: "app.a"), window("cg:2", pid: 2, bundle: "app.b"), window("cg:3", pid: 2, bundle: "app.b")]
+        let before = RecentOrderPolicy.decoded(try! JSONEncoder().encode(RecentOrderPolicy.snapshot(focus: ["cg:3": 300, "cg:1": 200, "cg:2": 100], windows: current, apps: [:], previous: RecentOrder())))
+        check(relisted(current, from: before, running: [1: "app.a", 2: "app.b"]) == ["cg:3", "cg:1", "cg:2"], "只重启一瞥：每个窗口都回到原来的位置")
+        let reopened = [window("cg:51", pid: 11, bundle: "app.a"), window("cg:52", pid: 12, bundle: "app.b"), window("cg:53", pid: 12, bundle: "app.b"), window("cg:54", pid: 13, bundle: "app.new")]
+        check(relisted(reopened, from: before, running: [11: "app.a", 12: "app.b", 13: "app.new"]) == ["cg:52", "cg:53", "cg:51", "cg:54"], "重启电脑：按应用恢复顺序，没用过的应用排在最后")
     }
     static func verifySettingsEntry() {
         check(SettingsWindowEntry.isOpen(visible: true, minimized: false, setAside: false), "显示着的设置窗口进入列表")

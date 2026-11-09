@@ -397,6 +397,60 @@ enum SettingsWindowEntry {
     }
 }
 
+/// When windows and apps were last used, kept across restarts. Only window numbers and app identifiers are saved,
+/// never a title: unlike a pin, nobody asked for this to be written down.
+struct RecentOrder: Codable, Equatable {
+    struct WindowUse: Codable, Equatable {
+        let id: String
+        let pid: Int32
+        let bundleID: String
+        let time: Double
+    }
+    var windows: [WindowUse] = []
+    /// App identifier and last use: what is left when a window number no longer means anything.
+    var apps: [String: Double] = [:]
+}
+
+enum RecentOrderPolicy {
+    static let windowLimit = 200
+    static let appLimit = 200
+    /// Saved this long after the first change, so a busy minute writes a few times and a crash loses little.
+    static let saveDelay: TimeInterval = 15
+    static func decoded(_ data: Data?) -> RecentOrder {
+        data.flatMap { try? JSONDecoder().decode(RecentOrder.self, from: $0) } ?? RecentOrder()
+    }
+    /// What to save now. An empty list means nothing has been read yet (just launched, or no permission), not that
+    /// every window closed, so the windows saved last time stay until a read can replace them.
+    static func snapshot(focus: [String: Double], windows: [WindowDescriptor], apps: [String: Double], previous: RecentOrder) -> RecentOrder {
+        var uses: [RecentOrder.WindowUse] = [], appTimes = apps
+        for window in windows {
+            guard let time = focus[window.id] else { continue }
+            appTimes[window.bundleID] = max(appTimes[window.bundleID] ?? 0, time)
+            // Other ids mean nothing after a restart.
+            if window.id.hasPrefix("cg:") { uses.append(.init(id: window.id, pid: window.pid, bundleID: window.bundleID, time: time)) }
+        }
+        let recentUses = uses.sorted { ($0.time, $0.id) > ($1.time, $1.id) }.prefix(windowLimit)
+        let recentApps = appTimes.filter { !$0.key.isEmpty && $0.value > 0 }.sorted { ($0.value, $0.key) > ($1.value, $1.key) }.prefix(appLimit)
+        return RecentOrder(windows: windows.isEmpty ? previous.windows : Array(recentUses),
+                           apps: Dictionary(uniqueKeysWithValues: recentApps.map { ($0.key, $0.value) }))
+    }
+    /// A window number is the same window only while the same process of the same app runs: a restarted Mac numbers
+    /// its windows from the start again, and hands out process ids again too. A time ahead of the clock, which
+    /// has been set back, would otherwise beat the window in front.
+    static func restoredFocus(_ order: RecentOrder, runningApps: [Int32: String], now: Double) -> [String: Double] {
+        var focus: [String: Double] = [:]
+        for window in order.windows where window.time > 0 && runningApps[window.pid] == window.bundleID { focus[window.id] = min(window.time, now) }
+        return focus
+    }
+    static func restoredApps(_ order: RecentOrder, now: Double) -> [String: Double] {
+        order.apps.filter { !$0.key.isEmpty && $0.value > 0 }.mapValues { min($0, now) }
+    }
+    /// The window's own last use, then its app's in this run, then its app's in any earlier run.
+    static func lastFocused(_ window: WindowDescriptor, focus: [String: Double], activated: [Int32: Double], apps: [String: Double]) -> Double {
+        focus[window.id] ?? focus["\(window.pid)|\(window.title)"] ?? activated[window.pid] ?? apps[window.bundleID] ?? 0
+    }
+}
+
 enum WindowListChange {
     /// Whether a fresh read changes anything the panel shows. Every read stamps the front window with the
     /// current time, so focus times count only through the order they put the windows in.

@@ -110,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.animationBehavior = .utilityWindow
         panel.contentView = materialView(NSHostingView(rootView: SwitcherView(state: state).frame(maxWidth: .infinity, maxHeight: .infinity)))
         loadPins()
+        engine.restoreRecentOrder()
         state.onSelect = { [weak self] index, commit in
             guard let self else { return }
             self.state.selectedIndex = index
@@ -213,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.stopActivityTimers(); self?.syncActivityTimers()
         })
         supportObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }; self.sleeping = true; if self.showing { self.dismiss() }; self.stopActivityTimers(); self.capture.cancel()
+            guard let self else { return }; self.sleeping = true; if self.showing { self.dismiss() }; self.stopActivityTimers(); self.capture.cancel(); self.engine.saveRecentOrder()
         })
         supportObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }; self.sleeping = false; self.engine.refreshObservers(); self.updateHotkeyGate(); self.syncActivityTimers()
@@ -251,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        engine.saveRecentOrder()
         // Every hidden menu bar icon comes back (macOS also ends the request with the process).
         menuBar.releaseAll()
         // The system ⌘Tab state outlives this process; always hand it back.
@@ -700,6 +702,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                              "lateScans": engine.lateScanCount, "idleRefreshes": idleRefreshCount],
          "quickRelease": ["atOnce": quickCommitCount, "waited": waitedCommitCount],
          "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
+         "recentOrder": engine.recentOrderCounts,
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
