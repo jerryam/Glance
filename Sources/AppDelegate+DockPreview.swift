@@ -15,6 +15,7 @@ extension AppDelegate {
             self.engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { _ in done() }
         }
         dockPreview.cachedImage = { [weak self] id in self?.state.images[id] }
+        dockPreview.storeImage = { [weak self] id, image in self?.state.storePreview(id, image: image) }
         dockPreview.isBlocked = { [weak self] in self?.showing ?? false }
         dockPreview.onFocus = { [weak self] handle in self?.focusFromDock(handle) }
         dockPreview.onClose = { handle in WindowControl.perform(.close, on: handle) }

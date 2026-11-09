@@ -69,6 +69,26 @@ func axFrame(_ element: AXUIElement) -> CGRect? {
     return CGRect(origin: point, size: size)
 }
 
+/// Everything the list needs from a window in one round trip; nil when its app did not answer in time.
+func axWindowFacts(_ window: AXUIElement) -> AXWindowFacts? {
+    var values: CFArray?
+    let status = AXUIElementCopyMultipleAttributeValues(window, AXWindowFacts.attributes as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
+    if status == .cannotComplete { return nil }
+    if status == .success, let values {
+        let facts = AXWindowFacts(values: values as [AnyObject])
+        if !facts.role.isEmpty { return facts }
+    }
+    // An app that does not implement the batched call still answers one attribute at a time.
+    var facts = AXWindowFacts()
+    facts.title = axAttribute(window, kAXTitleAttribute) as? String ?? ""
+    facts.frame = axFrame(window) ?? .zero
+    facts.minimized = (axAttribute(window, kAXMinimizedAttribute) as? NSNumber)?.boolValue ?? false
+    facts.role = axAttribute(window, kAXRoleAttribute) as? String ?? ""
+    facts.subrole = axAttribute(window, kAXSubroleAttribute) as? String ?? ""
+    facts.fullscreen = (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false
+    return facts
+}
+
 final class WindowHandle: Identifiable {
     let descriptor: WindowDescriptor
     let ax: AXUIElement?
@@ -116,6 +136,14 @@ final class WindowEngine: ObservableObject {
     private(set) var suppressedSurfaceCount = 0
     private(set) var unavailableWindowListCount = 0
     private(set) var lateScanCount = 0
+    /// Window and app events so far, and how many of them the last finished read could have seen.
+    private var cacheEvents = 0
+    private var cacheEventsRead = 0
+    private var cacheReadAt: TimeInterval = -1_000
+    /// Something has happened that the cached list cannot know about, whether or not a refresh is on its way.
+    var cacheStale: Bool { cacheEvents != cacheEventsRead }
+    var cacheAge: TimeInterval { ProcessInfo.processInfo.systemUptime - cacheReadAt }
+    private var pendingTitles = ChangeBatch<AXUIElement>()
     /// How long one refresh waits for every app. A hung app answers "cannot complete" within its own 0.2 second
     /// timeout, so this only cuts off an app that answers each call slowly.
     private static let scanDeadline: TimeInterval = 0.3
@@ -126,8 +154,8 @@ final class WindowEngine: ObservableObject {
     var onWindowsChange: (() -> Void)?
     /// The cached list may be behind: a window or app appeared, the Space changed, or the focused window is not in it.
     var onCacheStale: (() -> Void)?
-    /// (window id, new title) for a title change that did not need a full re-read.
-    var onTitleChange: ((String, String) -> Void)?
+    /// New titles by window id, from changes that did not need a full re-read.
+    var onTitlesChange: (([String: String]) -> Void)?
     /// Scanning every window for tab groups costs dozens of accessibility calls; only done when a
     /// switching scheme shows tabs separately.
     var scanTabs = false
@@ -150,7 +178,7 @@ final class WindowEngine: ObservableObject {
                      NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
             workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.watchApplications(); self?.trackFocus(); self?.onWindowsChange?(); self?.onCacheStale?()
+                self?.watchApplications(); self?.trackFocus(); self?.onWindowsChange?(); self?.markCacheStale()
             })
         }
         watchApplications()
@@ -162,8 +190,11 @@ final class WindowEngine: ObservableObject {
         axObservers.values.forEach { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource($0), .commonModes) }
     }
     func refreshObservers() { watchApplications(); trackFocus() }
+    private func markCacheStale() { cacheEvents += 1; onCacheStale?() }
+    // Moving or resizing is left out on purpose: neither changes which windows exist, and dragging a window
+    // would wake the main thread at every step for nothing.
     private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXTitleChangedNotification,
-        kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification, kAXResizedNotification, kAXMovedNotification]
+        kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
     private func watchWindow(_ window: AXUIElement, pid: Int32) {
         guard let observer = axObservers[pid], !(watchedWindows[pid] ?? []).contains(where: { CFEqual($0, window) }) else { return }
         for name in Self.windowNotifications {
@@ -174,19 +205,13 @@ final class WindowEngine: ObservableObject {
     private func windowEvent(_ window: AXUIElement, notification: String) {
         observerEventCounts[notification, default: 0] += 1
         if notification == kAXTitleChangedNotification {
-            // Only that entry changes; re-reading every app for a ticking title would waste work.
-            AXUIElementSetMessagingTimeout(window, 0.1)
-            guard let title = axAttribute(window, kAXTitleAttribute) as? String,
-                  let index = windows.firstIndex(where: { $0.tab == nil && $0.ax.map { CFEqual($0, window) } == true }) else { return }
-            var descriptor = windows[index].descriptor
-            guard descriptor.title != title else { return }
-            descriptor.title = title
-            windows[index] = windows[index].with(descriptor)
-            onTitleChange?(descriptor.id, title)
+            // Nothing shows a title while the panel is closed, and the read that opens it gets them all.
+            guard suspendTracking else { return }
+            if pendingTitles.add(window, same: { CFEqual($0, $1) }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.flushTitles() }
+            }
             return
         }
-        // Moving or resizing alone does not change which windows exist.
-        if notification == kAXMovedNotification || notification == kAXResizedNotification { return }
         if notification == kAXUIElementDestroyedNotification {
             windows.removeAll { handle in handle.ax.map { CFEqual($0, window) } == true }
             for pid in Array(watchedWindows.keys) { watchedWindows[pid]?.removeAll { CFEqual($0, window) } }
@@ -196,7 +221,24 @@ final class WindowEngine: ObservableObject {
         focusDebounce = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
         onWindowsChange?()
         if notification == kAXWindowCreatedNotification || notification == kAXWindowMiniaturizedNotification
-            || notification == kAXWindowDeminiaturizedNotification { onCacheStale?() }
+            || notification == kAXWindowDeminiaturizedNotification { markCacheStale() }
+    }
+    /// At most ten times a second, whatever the windows do: only those entries change, in one go.
+    private func flushTitles() {
+        let pending = pendingTitles.flush()
+        guard suspendTracking else { return }
+        var changes: [String: String] = [:]
+        for window in pending {
+            AXUIElementSetMessagingTimeout(window, 0.1)
+            guard let title = axAttribute(window, kAXTitleAttribute) as? String,
+                  let index = windows.firstIndex(where: { $0.tab == nil && $0.ax.map { CFEqual($0, window) } == true }) else { continue }
+            var descriptor = windows[index].descriptor
+            guard descriptor.title != title else { continue }
+            descriptor.title = title
+            windows[index] = windows[index].with(descriptor)
+            changes[descriptor.id] = title
+        }
+        if !changes.isEmpty { onTitlesChange?(changes) }
     }
     private func watchApplications() {
         guard AXIsProcessTrusted() else { return }
@@ -262,7 +304,7 @@ final class WindowEngine: ObservableObject {
         lastTracked = key
         focusHistory[key] = Date.timeIntervalSinceReferenceDate
         // Focus landed on a window the list has never seen, whichever event was missed.
-        if key.hasPrefix("cg:"), !windows.contains(where: { $0.id == key }) { onCacheStale?() }
+        if key.hasPrefix("cg:"), !windows.contains(where: { $0.id == key }) { markCacheStale() }
     }
     func refresh(frontPID: Int32?, completion: @escaping ([WindowHandle]) -> Void) {
         let request = refreshRequests.append(completion)
@@ -296,6 +338,7 @@ final class WindowEngine: ObservableObject {
     private func enumerate(frontPID: Int32?, request: Int) {
         let start = ProcessInfo.processInfo.systemUptime
         refreshing = true
+        let eventsBeforeRead = cacheEvents
         let trusted = AXIsProcessTrusted()
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier != ownPID }.map {
@@ -320,9 +363,9 @@ final class WindowEngine: ObservableObject {
             let cgOrder = Dictionary(uniqueKeysWithValues: entries.enumerated().map { ($0.element.id, $0.offset) })
             var handles: [WindowHandle] = [], currentID: String?
             var suppressedSurfaces = 0, unavailableWindowLists = 0
-            func decorate(_ input: WindowDescriptor, rect: CGRect, ax: AXUIElement?) -> WindowDescriptor {
+            func decorate(_ input: WindowDescriptor, rect: CGRect, ax: AXUIElement?, fullscreen: Bool = false) -> WindowDescriptor {
                 var d = input
-                d.fullscreen = ax.flatMap { (axAttribute($0, "AXFullScreen") as? NSNumber)?.boolValue } ?? false
+                d.fullscreen = fullscreen
                 d.frame = WindowRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
                 d.spaces = d.windowID.map { spaces.ids(for: $0) } ?? []
                 d.spaceKnown = !d.spaces.isEmpty
@@ -353,17 +396,14 @@ final class WindowEngine: ObservableObject {
                 var used = Set<UInt32>()
                 for ax in axWindows {
                     AXUIElementSetMessagingTimeout(ax, 0.15)
-                    let title = axAttribute(ax, kAXTitleAttribute) as? String ?? ""
-                    let frame = axFrame(ax) ?? .zero
-                    let minimized = (axAttribute(ax, kAXMinimizedAttribute) as? NSNumber)?.boolValue ?? false
-                    let role = axAttribute(ax, kAXRoleAttribute) as? String ?? ""
-                    let subrole = axAttribute(ax, kAXSubroleAttribute) as? String ?? ""
                     let nativeID = NativeBridge.windowID(ax)
-                    guard WindowEligibility.accepts(role: role, subrole: subrole, width: Double(frame.width), height: Double(frame.height),
-                        minimized: minimized, hidden: app.hidden, hasWindowID: nativeID != nil) else {
+                    guard let facts = axWindowFacts(ax),
+                          WindowEligibility.accepts(role: facts.role, subrole: facts.subrole, width: Double(facts.frame.width), height: Double(facts.frame.height),
+                        minimized: facts.minimized, hidden: app.hidden, hasWindowID: nativeID != nil) else {
                         if let nativeID { used.insert(nativeID) }
                         continue
                     }
+                    let title = facts.title, frame = facts.frame, minimized = facts.minimized
                     let candidates = cgWindows.filter { !used.contains($0.id) }
                     let match = nativeID.flatMap { id in candidates.first { $0.id == id } } ?? candidates.min { lhs, rhs in
                         Self.matchScore(lhs, title: title, frame: frame) < Self.matchScore(rhs, title: title, frame: frame)
@@ -377,14 +417,14 @@ final class WindowEngine: ObservableObject {
                     let visibleSpace = windowSpaces.isEmpty ? (match?.visible ?? false) : !spaces.visible.isDisjoint(with: windowSpaces)
                     var description = decorate(WindowDescriptor(id: id, windowID: windowID, pid: app.pid, appName: app.name, bundleID: app.bundle,
                                                        title: title.isEmpty ? (match?.title ?? "") : title, minimized: minimized, hidden: app.hidden,
-                                                       onCurrentSpace: visibleSpace, displayID: display, aspectRatio: Double(rect.width / max(1, rect.height))), rect: rect, ax: ax)
+                                                       onCurrentSpace: visibleSpace, displayID: display, aspectRatio: Double(rect.width / max(1, rect.height))), rect: rect, ax: ax, fullscreen: facts.fullscreen)
                     let tabs = scanTabs ? NativeBridge.tabs(in: ax) : []
                     if tabs.count > 1 { description.tabGroup = id }
                     result.handles.append(.init(descriptor: description, ax: ax, icon: app.icon))
                     for (tabIndex, tab) in tabs.enumerated() where (axAttribute(tab, kAXValueAttribute) as? NSNumber)?.boolValue != true {
                         let tabTitle = axAttribute(tab, kAXTitleAttribute) as? String ?? axAttribute(tab, kAXDescriptionAttribute) as? String ?? "标签页 \(tabIndex + 1)"
                         var d = decorate(WindowDescriptor(id: "\(id):tab:\(tabIndex)", windowID: windowID, pid: app.pid, appName: app.name, bundleID: app.bundle,
-                            title: tabTitle, minimized: minimized, hidden: app.hidden, onCurrentSpace: visibleSpace, displayID: display, aspectRatio: description.aspectRatio), rect: rect, ax: ax)
+                            title: tabTitle, minimized: minimized, hidden: app.hidden, onCurrentSpace: visibleSpace, displayID: display, aspectRatio: description.aspectRatio), rect: rect, ax: ax, fullscreen: facts.fullscreen)
                         d.tabGroup = id; d.tabRepresentative = false
                         result.handles.append(.init(descriptor: d, ax: ax, icon: app.icon, tab: tab))
                     }
@@ -465,6 +505,7 @@ final class WindowEngine: ObservableObject {
                 self.firstSeen = self.firstSeen.filter { ids.contains($0.key) }
                 for handle in result where self.firstSeen[handle.id] == nil { self.firstSeen[handle.id] = handle.descriptor.created }
                 self.windows = result
+                self.cacheEventsRead = eventsBeforeRead; self.cacheReadAt = start
                 self.suppressedSurfaceCount = suppressedSurfaces; self.unavailableWindowListCount = unavailableWindowLists
                 self.watchApplications()
                 let validIDs = Set(result.map(\.id))

@@ -58,8 +58,10 @@ final class DockPreviewController {
     var windows: ((Set<Int32>) -> [WindowHandle])?
     /// Re-reads the window list, then calls back on the main queue.
     var refreshWindows: ((@escaping () -> Void) -> Void)?
-    /// A capture the switcher already holds, so a card has a picture at once.
+    /// Captures live in one budgeted cache shared with the switcher, so a card has a picture at once and each
+    /// side can use what the other took.
     var cachedImage: ((String) -> NSImage?)?
+    var storeImage: ((String, NSImage) -> Void)?
     /// True while the switcher is open: the two never show together.
     var isBlocked: (() -> Bool)?
     var onFocus: ((WindowHandle) -> Void)?
@@ -94,8 +96,6 @@ final class DockPreviewController {
     private var generation = 0
     /// The Dock itself (its list of icons) when the preview opened, in screen coordinates.
     private var dockFrame: NSRect?
-    private var imageCache: [String: NSImage] = [:]
-    private var cacheOrder: [String] = []
 
     init() {
         state.onOpen = { [weak self] handle in self?.open(handle) }
@@ -315,22 +315,16 @@ final class DockPreviewController {
         state.showsTitles = items.contains { !$0.descriptor.title.isEmpty && $0.descriptor.title != target.name && $0.descriptor.title != $0.descriptor.appName }
         state.items = items
         var images: [String: NSImage] = [:]
-        for item in items { if let image = imageCache[item.id] ?? cachedImage?(item.id) { images[item.id] = image } }
+        for item in items { if let image = cachedImage?(item.id) { images[item.id] = image } }
         state.images = images
         state.flow = layout(for: items, target: target)
         let scale = (NSScreen.screens.first { $0.frame.intersects(target.iconFrame) } ?? NSScreen.main)?.backingScaleFactor ?? 2
         capture.thumbnailPixelWidth = Int((state.flow.widestThumbnail * Double(scale)).rounded())
         capture.prepare(items, prioritized: items.map(\.id)) { [weak self] id, image in
             guard let self else { return }
-            self.remember(id, image)
+            self.storeImage?(id, image)
             if self.state.items.contains(where: { $0.id == id }) { self.state.images[id] = image }
         }
-    }
-
-    private func remember(_ id: String, _ image: NSImage) {
-        imageCache[id] = image
-        cacheOrder.removeAll { $0 == id }; cacheOrder.append(id)
-        while cacheOrder.count > 40 { imageCache.removeValue(forKey: cacheOrder.removeFirst()) }
     }
 
     /// The largest thumbnails that keep every window within the screen beside the Dock.
@@ -443,6 +437,8 @@ final class DockPreviewController {
         capture.cancel()
         shown = nil
         state.hoveredID = nil
+        // Only the shared cache keeps pictures while closed, so its budget is the whole cost.
+        state.images = [:]
         log?("hide\(reason.isEmpty ? "" : " (\(reason))")")
     }
 

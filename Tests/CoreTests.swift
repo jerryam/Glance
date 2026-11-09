@@ -1,4 +1,5 @@
 import Foundation
+import ApplicationServices
 
 @main
 struct CoreTests {
@@ -268,7 +269,63 @@ struct CoreTests {
         verifyVersion20()
         verifyMenuBar()
         verifyPinsAndRecovery()
+        verifyOptimizations()
         print("\(passed) checks passed")
+    }
+    static func verifyOptimizations() {
+        check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: false), "列表刚读过且没有新事件时，快速松键直接切换")
+        check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: QuickCommitPolicy.maximumCacheAge, cacheStale: false), "列表刚好在信任期限内时，仍然直接切换")
+        check(!QuickCommitPolicy.commitsNow(selectionUntouched: false, cacheAge: 3, cacheStale: false), "手动改过选择时，等最新列表")
+        check(!QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: true), "读取之后有新窗口或应用事件时，等最新列表")
+        check(!QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: QuickCommitPolicy.maximumCacheAge + 0.1, cacheStale: false), "列表太旧时，等最新列表")
+
+        let display = WindowRect(x: 0, y: 0, width: 1920, height: 1080), second = WindowRect(x: 1920, y: 0, width: 1440, height: 900)
+        func fullscreen(ax: Bool = false, menuBar: Bool = false, _ windows: [(layer: Int, frame: WindowRect)] = []) -> Bool {
+            FrontFullscreenPolicy.isActive(windowFullscreen: ax, menuBarHidden: menuBar, frontWindows: windows, displays: [display, second])
+        }
+        check(fullscreen(ax: true), "系统全屏窗口算占满屏幕")
+        check(fullscreen(menuBar: true), "应用隐藏了菜单栏时算占满屏幕")
+        check(fullscreen([(layer: 25, frame: display)]), "高于普通窗口且盖住整块屏幕的窗口算占满屏幕")
+        check(fullscreen([(layer: 25, frame: second)]), "盖住第二块屏幕也算占满屏幕")
+        check(fullscreen([(layer: 1000, frame: WindowRect(x: -10, y: -10, width: 1940, height: 1100))]), "比屏幕还大的窗口也算占满屏幕")
+        check(!fullscreen([(layer: 0, frame: display)]), "普通层级的窗口铺满屏幕时，菜单栏还在，不算占满")
+        check(!fullscreen([(layer: 25, frame: WindowRect(x: 0, y: 0, width: 800, height: 600))]), "高层级的小窗口不算占满屏幕")
+        check(!fullscreen(), "没有这些迹象时，不算占满屏幕")
+
+        var batch = ChangeBatch<Int>()
+        check(batch.add(1, same: ==), "一批里的第一个变化要求安排刷新")
+        check(!batch.add(2, same: ==), "同一批后面的变化不再推迟刷新")
+        check(!batch.add(1, same: ==), "同一个窗口反复变化也不再安排")
+        check(batch.flush() == [1, 2], "一次刷新处理整批变化，同一窗口只算一次")
+        check(batch.flush().isEmpty, "刷新后这一批就清空了")
+        check(batch.add(3, same: ==), "刷新后的下一个变化重新要求安排")
+
+        var tabs = BrowserTabCache<String>()
+        tabs.keep(only: ["safari|1", "chrome|2"])
+        tabs.update("chrome|2", tabs: ["c1"])
+        check(tabs.all == ["c1"], "先回答的浏览器先显示，不等别的浏览器")
+        tabs.update("safari|1", tabs: ["s1", "s2"])
+        check(tabs.all == ["s1", "s2", "c1"], "结果按固定顺序排列，不随回答先后变化")
+        tabs.update("safari|1", tabs: nil)
+        check(tabs.all == ["s1", "s2", "c1"], "浏览器这次没回答时，保留上次的标签页")
+        tabs.update("safari|1", tabs: [])
+        check(tabs.all == ["c1"], "浏览器回答没有标签页时，清掉它上次的结果")
+        tabs.keep(only: ["safari|1", "chrome|9"])
+        check(tabs.all.isEmpty, "浏览器退出或重新启动后，不再显示它旧进程的标签页")
+
+        var point = CGPoint(x: 10, y: 20), size = CGSize(width: 300, height: 200), failure = AXError.attributeUnsupported
+        let position = AXValueCreate(.cgPoint, &point)!, dimension = AXValueCreate(.cgSize, &size)!, missing = AXValueCreate(.axError, &failure)!
+        check(AXWindowFacts.attributes.count == 7, "一次读取取回窗口的七个属性")
+        let facts = AXWindowFacts(values: ["报告" as NSString, position, dimension, kCFBooleanTrue, "AXWindow" as NSString, "AXStandardWindow" as NSString, missing])
+        check(facts.title == "报告" && facts.role == "AXWindow" && facts.subrole == "AXStandardWindow", "批量读取解析出标题和角色")
+        check(facts.frame == CGRect(x: 10, y: 20, width: 300, height: 200), "批量读取解析出窗口位置和大小")
+        check(facts.minimized, "批量读取解析出最小化状态")
+        check(!facts.fullscreen, "窗口没有的属性保持默认值")
+        let unanswered = AXWindowFacts(values: [missing, missing, missing, missing, missing, missing, missing])
+        check(unanswered.role.isEmpty && unanswered.frame == .zero, "全部读取失败时不当作有效窗口")
+        check(AXWindowFacts(values: [missing]).role.isEmpty, "返回的值比请求的少时不会越界")
+        let sizeOnly = AXWindowFacts(values: [missing, missing, dimension, missing, missing, missing, missing])
+        check(sizeOnly.frame == .zero, "位置和大小缺一项时不拼出半个窗口")
     }
     static func verifyPinsAndRecovery() {
         check(SettingsReturnPolicy.comesToFront(wasKey: true, cancelled: true, demo: false), "在设置窗口上取消面板后，设置窗口回到前面")

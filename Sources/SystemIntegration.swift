@@ -26,6 +26,95 @@ enum DockBadges {
     }
 }
 
+// MARK: - Full-screen front app
+
+/// Watches whether the front app has taken over the screen, so background work can stop while a game runs. It looks
+/// when the front app or Space changes; then every two seconds while the screen is taken over, and otherwise only as
+/// the pointer moves, so in normal use it never wakes 一瞥 by itself.
+final class FrontFullscreenWatch {
+    private(set) var active = false
+    var onChange: (() -> Void)?
+    private static let interval: TimeInterval = 2
+    private let queue = DispatchQueue(label: "Glance.frontFullscreen", qos: .utility)
+    private var observers: [NSObjectProtocol] = []
+    private var timer: Timer?
+    private var looking = false
+    private var lookedAt: TimeInterval = -1_000
+
+    init() {
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didWakeNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.look()
+                // A game usually takes over the screen a moment after it comes to the front.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.look() }
+            })
+        }
+    }
+    deinit {
+        timer?.invalidate()
+        observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+    }
+    func lookIfDue() {
+        if ProcessInfo.processInfo.systemUptime - lookedAt >= Self.interval { look() }
+    }
+    func look() {
+        guard !looking else { return }
+        guard let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { apply(false); return }
+        looking = true
+        lookedAt = ProcessInfo.processInfo.systemUptime
+        let pid = app.processIdentifier
+        // Each signal misses some games, so any one of them counts.
+        let options = NSApp.currentSystemPresentationOptions
+        let menuBarHidden = options.contains(.fullScreen) || options.contains(.hideMenuBar)
+        queue.async {
+            let value = FrontFullscreenPolicy.isActive(windowFullscreen: Self.focusedWindowIsFullscreen(pid), menuBarHidden: menuBarHidden,
+                                                       frontWindows: Self.windows(of: pid), displays: Self.displays())
+            DispatchQueue.main.async { [weak self] in
+                self?.looking = false
+                self?.apply(value)
+            }
+        }
+    }
+    private func apply(_ value: Bool) {
+        if !value { timer?.invalidate(); timer = nil }
+        else if timer == nil {
+            let repeating = Timer(timeInterval: Self.interval, repeats: true) { [weak self] _ in self?.look() }
+            repeating.tolerance = 0.5
+            RunLoop.main.add(repeating, forMode: .common)
+            timer = repeating
+        }
+        guard value != active else { return }
+        active = value
+        onChange?()
+    }
+    private static func focusedWindowIsFullscreen(_ pid: Int32) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        guard let focused = axAttribute(app, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        AXUIElementSetMessagingTimeout(focused as! AXUIElement, 0.1)
+        return (axAttribute(focused as! AXUIElement, "AXFullScreen") as? NSNumber)?.boolValue == true
+    }
+    private static func windows(of pid: Int32) -> [(layer: Int, frame: WindowRect)] {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return list.compactMap { window -> (layer: Int, frame: WindowRect)? in
+            guard window[kCGWindowOwnerPID as String] as? Int32 == pid, let layer = window[kCGWindowLayer as String] as? Int,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return nil }
+            return (layer: layer, frame: WindowRect(x: Double(rect.minX), y: Double(rect.minY), width: Double(rect.width), height: Double(rect.height)))
+        }
+    }
+    private static func displays() -> [WindowRect] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16), count: UInt32 = 0
+        guard CGGetActiveDisplayList(16, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { id in
+            let rect = CGDisplayBounds(id)
+            return WindowRect(x: Double(rect.minX), y: Double(rect.minY), width: Double(rect.width), height: Double(rect.height))
+        }
+    }
+}
+
 // MARK: - Browser tabs
 
 struct BrowserTabRef {
@@ -48,41 +137,52 @@ enum BrowserTabs {
                                    Browser(bundleID: "com.microsoft.edgemac", chromium: true),
                                    Browser(bundleID: "com.brave.Browser", chromium: true),
                                    Browser(bundleID: "com.vivaldi.Vivaldi", chromium: true)]
-    private static let queue = DispatchQueue(label: "Glance.browserTabs", qos: .userInitiated)
+    private static let queue = DispatchQueue(label: "Glance.browserTabs", qos: .userInitiated, attributes: .concurrent)
     private struct WindowTabs: Decodable { let id: Int; let active: Int; let titles: [String?]; let urls: [String?] }
-    private struct RunningBrowser { let browser: Browser; let pid: Int32; let name: String; let hidden: Bool; let icon: NSImage? }
-
-    /// Delivers the tabs of running browsers on the main queue. The active tab of each window is left
-    /// out because the window itself is already listed.
-    static func list(_ completion: @escaping ([WindowHandle]) -> Void) {
-        // Never address a browser that is not running: scripting it would launch it.
-        let running: [RunningBrowser] = browsers.compactMap { browser -> RunningBrowser? in
+    private struct RunningBrowser {
+        let browser: Browser; let pid: Int32; let name: String; let hidden: Bool; let icon: NSImage?
+        /// A relaunched browser is a new key: tabs found in its old process cannot be switched to.
+        var key: String { "\(browser.bundleID)|\(pid)" }
+    }
+    private static var running: [RunningBrowser] {
+        browsers.compactMap { browser -> RunningBrowser? in
             guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first(where: { !$0.isTerminated }) else { return nil }
             return RunningBrowser(browser: browser, pid: app.processIdentifier, name: app.localizedName ?? browser.bundleID, hidden: app.isHidden, icon: app.icon)
         }
-        guard !running.isEmpty else { completion([]); return }
-        queue.async {
-            var handles: [WindowHandle] = []
-            for item in running {
-                guard let output = runScript(listScript(item.browser)), let data = output.data(using: .utf8),
-                      let windows = try? JSONDecoder().decode([WindowTabs].self, from: data) else { continue }
-                for window in windows {
-                    for (offset, title) in window.titles.enumerated() where offset + 1 != window.active {
-                        let address = offset < window.urls.count ? (window.urls[offset] ?? "") : ""
-                        var descriptor = WindowDescriptor(id: "tab:\(item.browser.bundleID):\(window.id):\(offset + 1)", windowID: nil, pid: item.pid,
-                                                          appName: item.name, bundleID: item.browser.bundleID,
-                                                          title: (title ?? "").isEmpty ? address : (title ?? ""), minimized: false, hidden: item.hidden,
-                                                          onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
-                        descriptor.browserTab = true
-                        descriptor.subtitle = URL(string: address)?.host ?? address
-                        let reference = BrowserTabRef(bundleID: item.browser.bundleID, windowID: window.id, tabIndex: offset + 1, chromium: item.browser.chromium,
-                                                      url: address, title: title ?? "")
-                        handles.append(WindowHandle(descriptor: descriptor, ax: nil, icon: item.icon, browserTab: reference))
-                    }
-                }
+    }
+    /// Which browsers are running now, always in the same order, under the keys `list` answers with.
+    static var runningKeys: [String] { running.map(\.key) }
+
+    /// Asks every running browser at once and delivers each answer on the main queue as it arrives: nil when that
+    /// browser did not answer. The active tab of each window is left out because the window itself is already listed.
+    static func list(_ answer: @escaping (_ browser: String, _ tabs: [WindowHandle]?) -> Void) {
+        // Never address a browser that is not running: scripting it would launch it.
+        for item in running {
+            queue.async {
+                let tabs = tabs(of: item)
+                DispatchQueue.main.async { answer(item.key, tabs) }
             }
-            DispatchQueue.main.async { completion(handles) }
         }
+    }
+    private static func tabs(of item: RunningBrowser) -> [WindowHandle]? {
+        guard let output = runScript(listScript(item.browser)), let data = output.data(using: .utf8),
+              let windows = try? JSONDecoder().decode([WindowTabs].self, from: data) else { return nil }
+        var handles: [WindowHandle] = []
+        for window in windows {
+            for (offset, title) in window.titles.enumerated() where offset + 1 != window.active {
+                let address = offset < window.urls.count ? (window.urls[offset] ?? "") : ""
+                var descriptor = WindowDescriptor(id: "tab:\(item.browser.bundleID):\(window.id):\(offset + 1)", windowID: nil, pid: item.pid,
+                                                  appName: item.name, bundleID: item.browser.bundleID,
+                                                  title: (title ?? "").isEmpty ? address : (title ?? ""), minimized: false, hidden: item.hidden,
+                                                  onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+                descriptor.browserTab = true
+                descriptor.subtitle = URL(string: address)?.host ?? address
+                let reference = BrowserTabRef(bundleID: item.browser.bundleID, windowID: window.id, tabIndex: offset + 1, chromium: item.browser.chromium,
+                                              url: address, title: title ?? "")
+                handles.append(WindowHandle(descriptor: descriptor, ax: nil, icon: item.icon, browserTab: reference))
+            }
+        }
+        return handles
     }
     /// Tabs may have moved since they were listed: the listed position counts only if it still shows that
     /// address, then the address is looked up, then the title. Reports on the main queue whether the tab is in front.
