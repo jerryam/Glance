@@ -276,7 +276,101 @@ struct CoreTests {
         verifySettingsEntry()
         verifyRecentOrder()
         verifyBrowserScripts()
+        verifySearchHabits()
         print("\(passed) checks passed")
+    }
+    static func verifySearchHabits() {
+        let day = 86_400.0, start = 1_000_000.0, a = "app:a", b = "app:b"
+        func taught(_ choices: [(query: String, target: String)]) -> SearchHabits {
+            var habits = SearchHabits()
+            for choice in choices { habits.record(query: choice.query, target: choice.target, now: start) }
+            return habits
+        }
+        func repeated(_ count: Int, _ target: String, _ query: String = "wx") -> [(query: String, target: String)] {
+            Array(repeating: (query: query, target: target), count: count)
+        }
+        check(taught(repeated(1, a)).scores(for: "wx", now: start).isEmpty, "选一次可能是手滑，不改变排序")
+        check(taught(repeated(2, a)).scores(for: "wx", now: start)[a] != nil, "同一个搜索选两次后排到前面")
+        check(taught(repeated(2, a) + repeated(1, b)).scores(for: "wx", now: start).isEmpty, "改选别的结果后，旧习惯先退下来")
+        let changed = taught(repeated(10, a) + repeated(2, b)).scores(for: "wx", now: start)
+        check((changed[b] ?? 0) > (changed[a] ?? 0), "用了很久的习惯，改选两次后也会让位")
+
+        let light = taught(repeated(2, a)), strong = taught(repeated(10, a))
+        check(light.scores(for: "wx", now: start + 10 * day)[a] != nil, "几天不用，习惯还在")
+        check(light.scores(for: "wx", now: start + 30 * day).isEmpty && strong.scores(for: "wx", now: start + 30 * day)[a] != nil, "只选过两次的忘得快，选过很多次的留得久")
+        check(strong.scores(for: "wx", now: start + 120 * day).isEmpty, "很久不用的习惯会被忘掉")
+        check(light.scores(for: "wx", now: start - 30 * day)[a] == light.scores(for: "wx", now: start)[a], "时钟被调回去时，习惯不会变强")
+
+        check(taught(repeated(4, a, "chrome")).scores(for: "ch", now: start)[a] != nil, "输入全名选得多了，输入开头几个字也算")
+        check(taught(repeated(3, a, "chrome")).scores(for: "ch", now: start).isEmpty, "只算一部分：较短的搜索要选得更多才生效")
+        check(taught(repeated(4, a, "ch")).scores(for: "chrome", now: start)[a] != nil, "输入开头几个字选得多了，输入全名也算")
+        let both = taught(repeated(10, a, "ch") + repeated(10, b, "chess")).scores(for: "ch", now: start)
+        check((both[a] ?? 0) > (both[b] ?? 0), "正好是这个搜索选的，比更长的搜索选的更算数")
+        check(taught(repeated(10, a)).scores(for: "mail", now: start).isEmpty, "不相关的搜索不受影响")
+        check(taught(repeated(10, a)).scores(for: "", now: start).isEmpty && taught(repeated(10, a)).scores(for: "   ", now: start).isEmpty, "没有输入时没有习惯")
+        check(taught(repeated(2, a, "  WX ")).scores(for: "wx", now: start)[a] != nil, "忽略大小写和首尾空格")
+        check(taught(repeated(2, a, "Wei  Xin")).scores(for: "wei xin", now: start)[a] != nil, "多个空格算一个")
+
+        check(taught(repeated(2, a, String(repeating: "x", count: SearchHabits.longestQuery))).count == 1, "普通长度的搜索会记住")
+        check(taught(repeated(2, a, String(repeating: "x", count: SearchHabits.longestQuery + 1))).count == 0, "粘贴的长文本不写进本机存储")
+        check(taught(repeated(2, a, "   ")).count == 0, "空白不记录")
+        var crowded = SearchHabits()
+        for index in 0..<(SearchHabits.queryLimit + 3) { crowded.record(query: "q\(index)", target: a, now: start + Double(index)) }
+        check(crowded.count == SearchHabits.queryLimit, "记住的搜索有上限")
+        check(crowded.queries["q0"] == nil && crowded.queries["q\(SearchHabits.queryLimit + 2)"] != nil, "超过上限时忘掉最久没用的")
+        var busy = SearchHabits()
+        for index in 0..<(SearchHabits.targetLimit + 3) { busy.record(query: "wx", target: "app:\(index)", now: start) }
+        check(busy.queries["wx"]?.count == SearchHabits.targetLimit, "一个搜索记住的结果有上限")
+        check(busy.queries["wx"]?["app:\(SearchHabits.targetLimit + 2)"] != nil, "刚选的结果一定留下")
+        let saved = try! JSONEncoder().encode(strong)
+        let restored = SearchHabits.decoded(saved)
+        check(restored.count == 1 && restored.scores(for: "wx", now: start)[a] != nil, "保存后读回来还在")
+        check(SearchHabits.decoded(Data("不是 JSON".utf8)).count == 0 && SearchHabits.decoded(nil).count == 0, "读不出来时从空开始，不影响启动")
+
+        func window(_ id: String, app: String, bundle: String, title: String) -> WindowDescriptor {
+            WindowDescriptor(id: id, windowID: nil, pid: 1, appName: app, bundleID: bundle, title: title, minimized: false, hidden: false,
+                             onCurrentSpace: true, displayID: 1, aspectRatio: 1.6)
+        }
+        let wechat = window("cg:1", app: "微信", bundle: "app.wechat", title: "微信"), notes = window("cg:2", app: "备忘录", bundle: "app.notes", title: "wx-notes")
+        check(SearchHabits.target(of: wechat) == "app:app.wechat", "窗口按应用记住，不记标题和窗口编号")
+        var tab = wechat; tab.browserTab = true
+        check(SearchHabits.target(of: tab) == "app:app.wechat", "标签页也按应用记住，不记网址")
+        var opener = window("launch:app:app.wx", app: "wx 工具", bundle: "app.wx", title: "wx 工具"); opener.launcher = .app
+        check(SearchHabits.target(of: opener) == "app:app.wx", "没打开的应用和打开后的窗口算同一个")
+        var page = window("launch:setting:wifi", app: "设置", bundle: "wifi", title: "无线局域网"); page.launcher = .setting
+        check(SearchHabits.target(of: page) == "launch:setting:wifi", "设置页面按自己记住")
+        var icon = window("menubar:clock", app: "时钟", bundle: "app.clock", title: "时钟"); icon.menuBarItem = true
+        check(SearchHabits.target(of: icon) == "menubar:clock", "菜单栏图标按自己记住")
+        check(SearchHabits.target(of: window("cg:9", app: "无标识", bundle: "", title: "x")) == nil, "没有应用标识的窗口不记")
+
+        let settings = UserSettings.defaults, profile = settings.shortcuts[0]
+        func found(_ windows: [WindowDescriptor], _ query: String, _ learned: [String: Double] = [:]) -> [String] {
+            WindowSearch.filtered(windows, settings: settings, profile: profile, frontPID: nil, displayID: 1, query: query, learned: learned).map(\.id)
+        }
+        check(found([wechat, notes], "wx") == ["cg:2", "cg:1"], "没有习惯时，名称直接匹配排在拼音首字母之前")
+        check(found([wechat, notes], "wx", ["app:app.wechat": 1.7]) == ["cg:1", "cg:2"], "常选的结果排到最前，哪怕名称匹配更弱")
+        check(found([notes, wechat], "", ["app:app.wechat": 1.7]) == ["cg:2", "cg:1"], "没有输入时，习惯不影响切换顺序")
+        let mail = window("cg:3", app: "邮件", bundle: "app.mail", title: "邮件")
+        check(found([mail, notes], "wx", ["app:app.mail": 9]) == ["cg:2"], "常选的结果不匹配这次搜索时不会出现")
+        let first = window("cg:4", app: "甲", bundle: "app.first", title: "wx 甲"), second = window("cg:5", app: "乙", bundle: "app.second", title: "wx 乙")
+        check(found([first, second], "wx", ["app:app.first": 1.6, "app:app.second": 2]) == ["cg:5", "cg:4"], "都常选时，选得多的在前")
+        check(found([notes, opener], "wx").first == "cg:2", "没有习惯时，已打开的窗口排在要打开的应用之前")
+        check(found([notes, opener], "wx", ["app:app.wx": 1.7]).first == opener.id, "常选的应用即使没打开也排到前面")
+        var openers = (0..<WindowSearch.launcherLimit).map { index -> WindowDescriptor in
+            var item = window("launch:app:more\(index)", app: "wx\(index)", bundle: "more\(index)", title: "wx\(index)"); item.launcher = .app; return item
+        }
+        var longName = window("launch:app:long", app: "wx 名字很长的工具", bundle: "app.long", title: "wx 名字很长的工具"); longName.launcher = .app
+        openers.append(longName)
+        check(!found(openers, "wx").contains("launch:app:long"), "要打开的应用太多时，名字长的排不进去")
+        check(found(openers, "wx", ["app:app.long": 1.7]).first == "launch:app:long", "常选的应用不会被上限挤掉")
+
+        check(AdvancedSettings().searchLearning, "默认把常选的结果排到前面")
+        let older = try? JSONDecoder().decode(AdvancedSettings.self, from: Data("{}".utf8))
+        check(older?.searchLearning == true, "旧版本的设置升级后也开启")
+        var off = AdvancedSettings(); off.searchLearning = false
+        let reloaded = try? JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(off))
+        check(reloaded?.searchLearning == false, "关闭后保存下来")
+        check(SettingSearchIndex.results("常选").first?.section == 1 && SettingSearchIndex.results("搜索记录").first?.title == "把常选的结果排到前面", "设置搜索可以找到这个开关")
     }
     /// Runs the real scripts in JavaScriptCore against stand-ins for each kind of browser. This proves the scripts parse
     /// and take the right path; only a Mac with the browsers installed can prove the browsers answer the same way.

@@ -160,6 +160,7 @@ final class SettingsModel: ObservableObject {
     var applyHandler: (UserSettings) -> Void = { _ in }
     var errorsHandler: () -> [String] = { [] }
     var beforeFirstApply: () -> Void = {}
+    var clearHabitsHandler: () -> Void = {}
     private var appliedThisSession = false
     private var pending: DispatchWorkItem?
     var draft: UserSettings {
@@ -472,6 +473,14 @@ struct SettingsView: View {
                 SettingsToggle("搜索优先显示名称直接匹配的窗口", isOn: $model.draft.advanced.searchRanking)
                 SettingsToggle("容忍英文或完整拼音的一处拼写错误", isOn: $model.draft.advanced.searchTypos)
                 SettingsNote("名称匹配优先于拼音、首字母和拼写容错；同等匹配优先最近使用的窗口。四个字符起支持一处错字、漏字、多字或相邻字母颠倒。")
+                Group {
+                    SettingsToggle("把常选的结果排到前面", isOn: $model.draft.advanced.searchLearning)
+                    SettingsNote("同一个搜索连续选同一个结果两次后，它会排到最前面；改选别的结果，顺序也会跟着变。记录只保存在这台 Mac 上，包括输入的文字和选中的应用或设置页面，不包括窗口标题，也不随设置导出。")
+                    HStack(spacing: 8) {
+                        Button("清除搜索记录") { model.clearHabitsHandler(); model.note("已清除搜索记录。") }
+                        Spacer(minLength: 8)
+                    }
+                }
                 SettingsToggle("搜索时包含浏览器标签页", isOn: $model.draft.advanced.browserTabs)
                 SettingsNote("支持 Safari、Chrome、Chrome Beta、Edge、Brave、Vivaldi、Opera 和 Arc，也支持提供相同脚本接口的其他 Chromium 浏览器，比如部分国产浏览器。只在搜索时读取正在运行的浏览器的标签页标题和网址，不读取网页内容；第一次使用时，macOS 会询问是否允许一瞥控制该浏览器。")
                 SettingsToggle("搜索时包含未打开的应用", isOn: $model.draft.advanced.searchApps)

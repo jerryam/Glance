@@ -264,6 +264,7 @@ struct AdvancedSettings: Codable, Equatable {
     var inputMode: PanelInputMode = .search
     var searchRanking = true
     var searchTypos = true
+    var searchLearning = true
     var showSearchHint = true
     var shiftSelectsPrevious = true
     var voiceOverKeepsOpen = true
@@ -300,7 +301,7 @@ struct AdvancedSettings: Codable, Equatable {
     var exceptions = AppException.defaults
     init() {}
     private enum CodingKeys: String, CodingKey {
-        case preferencesRevision, inputMode, searchRanking, searchTypos
+        case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning
         case showSearchHint, shiftSelectsPrevious, voiceOverKeepsOpen, gestureAvoidsSystem, independentGesture
         case focusMethod, commandLineEnabled, dockBadges, browserTabs, searchApps, searchSettingsPages, numberHints
         case titleDisplay, titleCut, panelScreen, followCursor, gesture, gestureProfile, haptics, arrowKeys, vimKeys
@@ -314,6 +315,7 @@ struct AdvancedSettings: Codable, Equatable {
         inputMode = try c.decodeIfPresent(PanelInputMode.self, forKey: .inputMode) ?? .search
         searchRanking = try c.decodeIfPresent(Bool.self, forKey: .searchRanking) ?? true
         searchTypos = try c.decodeIfPresent(Bool.self, forKey: .searchTypos) ?? true
+        searchLearning = try c.decodeIfPresent(Bool.self, forKey: .searchLearning) ?? true
         showSearchHint = try c.decodeIfPresent(Bool.self, forKey: .showSearchHint) ?? true
         shiftSelectsPrevious = try c.decodeIfPresent(Bool.self, forKey: .shiftSelectsPrevious) ?? true
         voiceOverKeepsOpen = try c.decodeIfPresent(Bool.self, forKey: .voiceOverKeepsOpen) ?? true

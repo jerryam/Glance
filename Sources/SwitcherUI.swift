@@ -39,6 +39,7 @@ final class SwitcherState: ObservableObject {
     var extraItems: [WindowHandle] = []
     /// 一瞥's own settings window while it is open; window refreshes replace `all`, which never includes it.
     var ownItems: [WindowHandle] = []
+    var habits = SearchHabits()
     var pinnedIDs = Set<String>()
     /// When grouping by app, the app whose windows are currently expanded.
     var expandedApp: Int32?
@@ -104,7 +105,8 @@ final class SwitcherState: ObservableObject {
         let descriptors = WindowSearch.filtered(source.map { handle in
                 var descriptor = handle.descriptor; descriptor.pinned = pinned.contains(descriptor.id); return descriptor
             }, settings: settings, profile: profile, frontPID: frontPID, displayID: displayID, query: query,
-            cursorX: cursor.map { Double($0.x) }, cursorY: cursor.map { Double($0.y) }, expandedApp: expandedApp)
+            cursorX: cursor.map { Double($0.x) }, cursorY: cursor.map { Double($0.y) }, expandedApp: expandedApp,
+            learned: settings.advanced.searchLearning ? habits.scores(for: query, now: Date.timeIntervalSinceReferenceDate) : [:])
         let handles = Dictionary(source.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let previousID = selected?.id
         // Keep the filtered descriptor (pin and group count) with the handle that the card shows.

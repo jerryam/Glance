@@ -177,6 +177,23 @@ extension AppDelegate {
         if !state.query.isEmpty { state.refilter(reset: false) }
     }
 
+    // MARK: Search habits
+
+    /// Kept apart from the settings, so it is not part of a settings export.
+    static let searchHabitsKey = "WindowHop.searchHabits.v1"
+    func loadSearchHabits() {
+        state.habits = SearchHabits.decoded(UserDefaults.standard.data(forKey: Self.searchHabitsKey))
+    }
+    func recordSearchChoice(_ selected: WindowHandle) {
+        guard state.settings.advanced.searchLearning, !state.query.isEmpty, let target = SearchHabits.target(of: selected.descriptor) else { return }
+        state.habits.record(query: state.query, target: target, now: Date.timeIntervalSinceReferenceDate)
+        if let data = try? JSONEncoder().encode(state.habits) { UserDefaults.standard.set(data, forKey: Self.searchHabitsKey) }
+    }
+    func clearSearchHabits() {
+        state.habits = SearchHabits()
+        UserDefaults.standard.removeObject(forKey: Self.searchHabitsKey)
+    }
+
     // MARK: Grouping by app
 
     /// Opens the selected app's windows. Returns false when there is nothing to expand.

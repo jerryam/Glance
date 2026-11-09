@@ -137,7 +137,7 @@ enum WindowSearch {
     }
     static func filtered(_ windows: [WindowDescriptor], settings: UserSettings, profile: ShortcutProfile,
                          frontPID: Int32?, displayID: UInt32?, query: String,
-                         cursorX: Double? = nil, cursorY: Double? = nil, expandedApp: Int32? = nil) -> [WindowDescriptor] {
+                         cursorX: Double? = nil, cursorY: Double? = nil, expandedApp: Int32? = nil, learned: [String: Double] = [:]) -> [WindowDescriptor] {
         let excluded = settings.exclusions.components(separatedBy: .newlines).map(normalized).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         let minimized = profile.minimized ?? (settings.showMinimized ? .show : .hide)
         let hidden = profile.hidden ?? (settings.showHidden ? .show : .hide)
@@ -176,7 +176,13 @@ enum WindowSearch {
         let hasPinned = tokens.isEmpty && candidates.contains { $0.pinned }
         let currentID = hasPinned && profile.order == .recent ? candidates.max { $0.lastFocused < $1.lastFocused }?.id : nil
         func pinRank(_ w: WindowDescriptor) -> Int { w.id == currentID ? 0 : (w.pinned ? 1 : 2) }
+        var habit: [String: Double] = [:]
+        if !tokens.isEmpty && !learned.isEmpty {
+            for w in candidates { if let target = SearchHabits.target(of: w), let score = learned[target] { habit[w.id] = score } }
+        }
         candidates.sort { a, b in
+            // What the user keeps choosing for this search comes first, however well the others' names match.
+            if !habit.isEmpty, habit[a.id] != habit[b.id] { return (habit[a.id] ?? 0) > (habit[b.id] ?? 0) }
             if !tokens.isEmpty && settings.advanced.searchRanking, let ar = quality[a.id], let br = quality[b.id], ar != br { return ar < br }
             // Equally good matches: windows that are already open come before things to open.
             if !tokens.isEmpty && (a.launcher == nil) != (b.launcher == nil) { return a.launcher == nil }
@@ -224,6 +230,74 @@ enum WindowSearch {
             }
         }
         return candidates
+    }
+}
+
+/// Which result the user chooses for what they type, so the one they keep choosing comes first next time. Saved on this
+/// Mac only and not part of a settings export. A window is remembered by its app, never by its title or number.
+struct SearchHabits: Codable, Equatable {
+    struct Pick: Codable, Equatable {
+        var weight: Double
+        var time: Double
+    }
+    /// Normalized search text, then what was chosen for it.
+    private(set) var queries: [String: [String: Pick]] = [:]
+
+    static let queryLimit = 300
+    static let targetLimit = 5
+    /// Pasted text is not a habit, and may be something that should not be written down.
+    static let longestQuery = 40
+    /// Each choice fades the others for that search, so a new habit overtakes an old one within two choices.
+    static let fade = 0.7
+    /// One choice can be a slip: it takes two in a row to change the order.
+    static let threshold = 1.5
+    /// A habit left unused for this long counts half.
+    static let halfLife = 90.0 * 86_400
+    /// What a choice counts for a longer or shorter form of its search: "chrome" also teaches "ch", less strongly.
+    static let relatedShare = 0.6
+    private static let forgotten = 0.05
+
+    static func decoded(_ data: Data?) -> SearchHabits {
+        data.flatMap { try? JSONDecoder().decode(SearchHabits.self, from: $0) } ?? SearchHabits()
+    }
+    /// What a choice is remembered by. Windows, tabs and apps to open count for their app, which outlives a restart.
+    static func target(of window: WindowDescriptor) -> String? {
+        if window.launcher == .setting || window.menuBarItem { return window.id }
+        return window.bundleID.isEmpty ? nil : "app:\(window.bundleID)"
+    }
+    var count: Int { queries.count }
+    private static func key(_ query: String) -> String {
+        WindowSearch.normalized(query).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+    /// A clock set back must not make a habit stronger than it was.
+    private static func current(_ pick: Pick, now: Double) -> Double {
+        pick.weight * pow(0.5, max(0, now - pick.time) / halfLife)
+    }
+    private static func lastUse(_ picks: [String: Pick]) -> Double {
+        picks.values.map(\.time).max() ?? 0
+    }
+    mutating func record(query: String, target: String, now: Double) {
+        let key = Self.key(query)
+        guard !key.isEmpty, key.count <= Self.longestQuery else { return }
+        var picks = (queries[key] ?? [:]).mapValues { Pick(weight: Self.current($0, now: now) * Self.fade, time: now) }
+        picks[target, default: Pick(weight: 0, time: now)].weight += 1
+        let kept = picks.filter { $0.value.weight >= Self.forgotten }.sorted { ($0.value.weight, $0.key) > ($1.value.weight, $1.key) }.prefix(Self.targetLimit)
+        queries[key] = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
+        if queries.count > Self.queryLimit, let oldest = queries.min(by: { Self.lastUse($0.value) < Self.lastUse($1.value) })?.key {
+            queries.removeValue(forKey: oldest)
+        }
+    }
+    /// The results that have earned a place ahead of the others for this search, and how strongly.
+    func scores(for query: String, now: Double) -> [String: Double] {
+        let key = Self.key(query)
+        guard !key.isEmpty else { return [:] }
+        var best: [String: Double] = [:]
+        for (stored, picks) in queries {
+            let share: Double
+            if stored == key { share = 1 } else if stored.hasPrefix(key) || key.hasPrefix(stored) { share = Self.relatedShare } else { continue }
+            for (target, pick) in picks { best[target] = max(best[target] ?? 0, Self.current(pick, now: now) * share) }
+        }
+        return best.filter { $0.value >= Self.threshold }
     }
 }
 

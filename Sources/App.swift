@@ -111,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.contentView = materialView(NSHostingView(rootView: SwitcherView(state: state).frame(maxWidth: .infinity, maxHeight: .infinity)))
         loadPins()
         engine.restoreRecentOrder()
+        loadSearchHabits()
         state.onSelect = { [weak self] index, commit in
             guard let self else { return }
             self.state.selectedIndex = index
@@ -703,6 +704,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "quickRelease": ["atOnce": quickCommitCount, "waited": waitedCommitCount],
          "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
          "recentOrder": engine.recentOrderCounts,
+         "searchHabits": state.habits.count,
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
@@ -926,6 +928,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if state.isDemo { dismiss(); return }
+        recordSearchChoice(selected)
         if selected.descriptor.menuBarItem {
             let id = selected.id
             dismiss()
@@ -1120,6 +1123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Changes apply as they are made; the first one in each session backs up the previous settings.
             model.applyHandler = { [weak self] in self?.settings.save($0) }
             model.errorsHandler = { [weak self] in self?.shortcutErrors ?? [] }
+            model.clearHabitsHandler = { [weak self] in self?.clearSearchHabits() }
             model.beforeFirstApply = { [weak self] in self?.settings.snapshotBackup() }
             settingsModel = model
         }
