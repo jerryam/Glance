@@ -71,7 +71,7 @@ struct SearchBenchmark {
             results.append(measure("\(count) windows", windows(count, tag: "w\(count)"), settings: settings))
         }
         results.append(measure("40 windows + 400 apps and settings", windows(40, tag: "a") + launchers(400, tag: "a"), settings: settings))
-        // More entries than the index cache keeps.
+        // More than 800 entries: what the index cache could hold until it was changed to keep 1500 to 3000.
         results.append(measure("40 windows + 1200 apps and settings", windows(40, tag: "b") + launchers(1200, tag: "b"), settings: settings))
         results.append(measure("40 windows + 400, double pinyin on", windows(40, tag: "c") + launchers(400, tag: "c"), settings: shuangpin))
         let payload: [String: Any] = ["measurement": "Synthetic filtering only; excludes enumeration, rendering and keypress latency", "queries": queries, "results": results]

@@ -275,6 +275,7 @@ struct CoreTests {
         verifyThreading()
         verifyStaleLists()
         verifyIdleWork()
+        verifySearchCache()
         verifyWindowShortcuts()
         verifySettingsEntry()
         verifyRecentOrder()
@@ -1290,6 +1291,22 @@ struct CoreTests {
         let reopened = WindowDescriptor(id: "cg:12", windowID: 12, pid: 77, appName: "备忘录", bundleID: "com.apple.Notes", title: "本周计划",
                                         minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
         check(PinPolicy.resolve([waitingPin], windows: [unrelated, reopened], runningApps: [:], liveWindowIDs: []).map(\.id) == ["cg:12"], "应用重新打开后，等待的置顶同样认回它的窗口")
+    }
+    static func verifySearchCache() {
+        var cache = RecencyCache<Int, Int>(limit: 3)
+        var built = 0
+        func ask(_ key: Int) -> Int { cache.value(for: key) { built += 1; return key * 10 } }
+        for key in 1...6 { _ = ask(key) }
+        check(built == 6 && cache.count == 6, "索引缓存装得下上限的两倍")
+        for _ in 0..<3 { for key in 1...6 { _ = ask(key) } }
+        check(built == 6, "在两倍上限以内反复查同一批条目，不重算任何一项")
+        check(ask(4) == 40, "取回的是原来算好的值")
+        _ = ask(7)
+        check(cache.count == 3, "超过两倍上限时，一次丢掉最久没用的那一半")
+        _ = ask(6); _ = ask(4)
+        check(built == 7, "最近用过的条目留着")
+        _ = ask(1)
+        check(built == 8, "最久没用的条目丢掉了，再用时重新算")
     }
     static func verifyOptimizations() {
         check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: false), "列表刚读过且没有新事件时，快速松键直接切换")

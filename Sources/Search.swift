@@ -42,19 +42,14 @@ enum WindowSearch {
         }
     }
     private final class IndexCache {
-        private struct Entry { let value: Index; var accessed: UInt64 }
-        private var entries: [String: Entry] = [:]
-        private var clock: UInt64 = 0
+        /// Windows, apps that are not running, settings pages, browser tabs and files all pass through here. With
+        /// room for 800, a search over more than that rebuilt nearly every entry on every keystroke.
+        private var entries = RecencyCache<String, Index>(limit: 1500)
         private let lock = NSLock()
         func value(for window: WindowDescriptor, shuangpin: ShuangpinScheme) -> Index {
             let key = "\(shuangpin.rawValue)\u{0}\(window.appName)\u{0}\(window.title)\u{0}\(window.bundleID)\u{0}\(window.subtitle ?? "")"
             lock.lock(); defer { lock.unlock() }
-            clock &+= 1
-            if var entry = entries[key] { entry.accessed = clock; entries[key] = entry; return entry.value }
-            let value = Index(window, shuangpin: shuangpin)
-            if entries.count >= 800, let oldest = entries.min(by: { $0.value.accessed < $1.value.accessed })?.key { entries.removeValue(forKey: oldest) }
-            entries[key] = Entry(value: value, accessed: clock)
-            return value
+            return entries.value(for: key) { Index(window, shuangpin: shuangpin) }
         }
     }
     private static let cache = IndexCache()
@@ -685,6 +680,30 @@ enum Shuangpin {
         }
         var seen = Set<String>()
         return candidates.filter { seen.insert($0).inserted }
+    }
+}
+
+/// Keeps the values asked for most recently. It holds up to twice its limit and then drops the older half in one
+/// go, so a lookup never searches for the oldest entry, and going round a list of up to twice the limit again and
+/// again rebuilds nothing.
+struct RecencyCache<Key: Hashable, Value> {
+    private struct Entry { let value: Value; var used: UInt64 }
+    private var entries: [Key: Entry] = [:]
+    private var clock: UInt64 = 0
+    let limit: Int
+    init(limit: Int) { self.limit = max(1, limit) }
+    var count: Int { entries.count }
+    mutating func value(for key: Key, make: () -> Value) -> Value {
+        clock &+= 1
+        if var entry = entries[key] { entry.used = clock; entries[key] = entry; return entry.value }
+        let value = make()
+        entries[key] = Entry(value: value, used: clock)
+        if entries.count > limit * 2 {
+            // Every use has its own tick, so this keeps exactly `limit` entries: the ones used last.
+            let cutoff = entries.values.map { $0.used }.sorted()[entries.count - limit]
+            entries = entries.filter { $0.value.used >= cutoff }
+        }
+        return value
     }
 }
 
