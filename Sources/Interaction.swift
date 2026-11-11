@@ -654,6 +654,16 @@ enum FileSearchPolicy {
             return words.allSatisfy { folded.contains($0) }
         }.sorted()
     }
+    /// Kinds of file that opening would run rather than show: programs, and the scripts that Terminal or a launcher runs.
+    static let runnableTypes: Set<String> = ["public.executable", "public.unix-executable", "public.shell-script", "public.python-script",
+                                             "com.apple.terminal.shell-script", "com.apple.terminal.settings", "com.sun.java-archive"]
+    /// The same by the end of the name, for a file whose kind is not known.
+    static let runnableExtensions: Set<String> = ["command", "tool", "terminal", "sh", "bash", "zsh", "csh", "ksh", "fish", "jar", "py", "pyw"]
+    /// Whether opening this file would run it. `types` are its kind and every kind that one belongs to.
+    /// ↩ in a search is pressed too easily for that: such a file is shown in Finder, where opening it is a second, deliberate step.
+    static func runsWhenOpened(name: String, types: Set<String>) -> Bool {
+        !types.isDisjoint(with: runnableTypes) || runnableExtensions.contains((name as NSString).pathExtension.lowercased())
+    }
     /// Where it is, for the line under its name.
     static func place(of path: String, home: String) -> String {
         let folder = (path as NSString).deletingLastPathComponent

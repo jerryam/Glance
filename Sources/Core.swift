@@ -512,6 +512,11 @@ struct WindowDescriptor: Identifiable, Equatable {
     var subtitle: String? = nil
     /// What a result made from the search opens or copies: a file's path, a web address, the answer to a sum.
     var launchTarget: String? = nil
+    /// A file that opening would run: a program or a script. ↩ shows it in Finder instead.
+    var revealOnly = false
+    /// What ↩ does to a result that is not a window: for a button, and as a sentence.
+    var launchAction: String? { revealOnly ? "在访达中显示" : launcher?.action }
+    var launchHint: String? { revealOnly ? "程序和脚本不直接运行：按 ↩ 在访达中显示" : launcher?.hint }
     var pinned = false
     /// Number of windows folded into this entry when grouping by app.
     var groupCount = 0

@@ -486,6 +486,20 @@ struct CoreTests {
         check(FileSearchPolicy.place(of: "/Users/me/Documents/a.txt", home: home) == "~/Documents", "子文件夹里的文件")
         check(FileSearchPolicy.place(of: "/Users/me/a.txt", home: home) == "~", "主目录里的文件")
         check(FileSearchPolicy.place(of: "/tmp/a.txt", home: home) == "/tmp", "其他位置的文件")
+        // Programs and scripts are shown in Finder instead of being run.
+        let runs = FileSearchPolicy.runsWhenOpened
+        for name in ["backup.command", "Deploy.SH", "tool.py", "app.jar", "login.terminal"] { check(runs(name, []), "按名称认出打开就会运行的文件：\(name)") }
+        check(runs("mytool", ["public.unix-executable", "public.executable", "public.data"]), "没有扩展名的可执行文件按类型认出")
+        check(runs("setup", ["public.shell-script", "public.script", "public.source-code"]), "没有扩展名的脚本按类型认出")
+        check(!runs("报告.pdf", ["com.adobe.pdf", "public.data"]) && !runs("notes.txt", []) && !runs("command", []), "文档照常打开")
+        check(!runs("index.js", ["com.netscape.javascript-source", "public.source-code"]) && !runs("main.swift", ["public.swift-source"]), "其他源代码照常打开")
+        var program = WindowDescriptor(id: "file:/Users/me/run.command", windowID: nil, pid: 0, appName: "~", bundleID: "", title: "run.command",
+                                       minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        program.launcher = .file
+        check(program.launchAction == "打开" && program.launchHint == LaunchKind.file.hint, "普通文件回车打开")
+        program.revealOnly = true
+        check(program.launchAction == "在访达中显示" && program.launchHint?.contains("访达") == true, "程序和脚本回车在访达中显示")
+        check(program.launcher == .file && program.searchOnly, "它仍然是一条文件结果")
 
         // Together in the results.
         func result(_ id: String, title: String, kind: LaunchKind?, bundle: String = "", pid: Int32 = 0) -> WindowDescriptor {

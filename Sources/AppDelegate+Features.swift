@@ -363,7 +363,10 @@ extension AppDelegate {
             return true
         case .file:
             guard let path = descriptor.launchTarget else { return false }
-            return NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            let url = URL(fileURLWithPath: path)
+            // Opening a program or a script would run it.
+            if descriptor.revealOnly { NSWorkspace.shared.activateFileViewerSelecting([url]); return true }
+            return NSWorkspace.shared.open(url)
         case .web:
             // Only ever built here as http or https; checked again because this is where it leaves for the browser.
             guard let target = descriptor.launchTarget, let url = URL(string: target), ["http", "https"].contains((url.scheme ?? "").lowercased()) else { return false }

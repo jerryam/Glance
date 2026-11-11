@@ -24,6 +24,8 @@ final class FileSearch {
     private var pending: DispatchWorkItem?
     /// The matching files that lie loose in the home folder, found when a search starts.
     private var loose: [String] = []
+    /// The kind of each of them, by its path. Spotlight tells the kind of what it finds, and is not asked about these.
+    private var looseTypes: [String: String] = [:]
     private(set) var results: [WindowHandle] = []
     var onUpdate: (() -> Void)?
 
@@ -61,6 +63,8 @@ final class FileSearch {
             if isFolder { folders.append(entry.lastPathComponent) } else { files.append(entry.lastPathComponent) }
         }
         loose = FileSearchPolicy.loose(files, tokens: tokens).map { home.appendingPathComponent($0).path }
+        looseTypes = [:]
+        for path in loose { looseTypes[path] = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.contentTypeKey]))?.contentType?.identifier }
         let scopes: [Any] = FileSearchPolicy.folders(folders).map { home.appendingPathComponent($0, isDirectory: true) }
         let search = NSMetadataQuery()
         search.searchScopes = scopes.isEmpty ? [NSMetadataQueryUserHomeScope as Any] : scopes
@@ -96,7 +100,8 @@ final class FileSearch {
             descriptor.launcher = .file
             descriptor.launchTarget = path
             // By the kind of file, so that listing a result never touches anything inside Documents or Desktop.
-            let kind = types[path].flatMap { UTType($0) } ?? UTType(filenameExtension: (path as NSString).pathExtension) ?? .data
+            let kind = (types[path] ?? looseTypes[path]).flatMap { UTType($0) } ?? UTType(filenameExtension: (path as NSString).pathExtension) ?? .data
+            descriptor.revealOnly = FileSearchPolicy.runsWhenOpened(name: descriptor.title, types: Set([kind.identifier] + kind.supertypes.map { $0.identifier }))
             let icon = NSWorkspace.shared.icon(for: kind)
             return WindowHandle(descriptor: descriptor, ax: nil, icon: icon)
         }

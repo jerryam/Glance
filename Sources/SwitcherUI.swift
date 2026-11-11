@@ -369,9 +369,9 @@ private struct WindowActionsMenu: View {
     var body: some View {
         Group {
             if includeSwitch {
-                Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launcher?.action ?? "切换到窗口")) { state.selectWindow(item.id, commit: true) }
+                Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launchAction ?? "切换到窗口")) { state.selectWindow(item.id, commit: true) }
             }
-            if item.descriptor.launcher == .file, let path = item.descriptor.launchTarget {
+            if item.descriptor.launcher == .file, !item.descriptor.revealOnly, let path = item.descriptor.launchTarget {
                 Button("在访达中显示") { state.onRevealFile?(path) }
             }
             if !item.descriptor.searchOnly && !item.descriptor.settingsWindow {
@@ -562,7 +562,7 @@ private struct PreviewImage: View {
     private var placeholder: String {
         if item.descriptor.browserTab { return item.descriptor.subtitle ?? "浏览器标签页" }
         if item.descriptor.menuBarItem { return "按 ↩ 打开它的菜单" }
-        if let kind = item.descriptor.launcher { return kind.hint }
+        if let hint = item.descriptor.launchHint { return hint }
         if item.descriptor.settingsWindow { return "一瞥的设置窗口" }
         if item.descriptor.windowless { return "没有打开的窗口" }
         if item.descriptor.minimized { return "窗口已最小化" }
@@ -1052,7 +1052,7 @@ private struct SearchDetail: View {
                     }
                     Spacer(minLength: 8)
                     // In the demo this closes the panel, like Return does.
-                    Button(item.descriptor.launcher.map { "\($0.action) ↵" } ?? (item.descriptor.menuBarItem ? "打开菜单 ↵" : "切换 ↵")) {
+                    Button(item.descriptor.launchAction.map { "\($0) ↵" } ?? (item.descriptor.menuBarItem ? "打开菜单 ↵" : "切换 ↵")) {
                         state.onSelect?(state.selectedIndex, true)
                     }.buttonStyle(GlanceButtonStyle(primary: true, compact: true))
                 }
