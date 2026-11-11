@@ -198,7 +198,7 @@ extension AppDelegate {
         var extra = (advanced.browserTabs ? browserTabs.all : []) + menuBar.searchResults()
         extra += launcher.results(apps: advanced.searchApps, settingsPages: advanced.searchSettingsPages, commands: advanced.searchCommands)
         if advanced.searchFiles { extra += fileSearch.results }
-        if advanced.searchCommands { extra += layoutRows() }
+        if LayoutSnapshotPolicy.listedInSearch(commands: advanced.searchCommands, saved: layouts.count) { extra += layoutRows() }
         state.extraItems = extra
         if !state.query.isEmpty { state.refilter(reset: false) }
     }

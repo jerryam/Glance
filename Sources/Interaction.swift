@@ -377,8 +377,6 @@ enum SettingsReturnPolicy {
     static func comesToFront(wasKey: Bool, cancelled: Bool, demo: Bool) -> Bool { wasKey && (cancelled || demo) }
 }
 
-/// 一瞥 leaves its own process out of the window list. Its settings window joins the switcher through this
-/// entry, so it can be reached again after switching away from it.
 /// The decisions behind the Dock preview's live pictures, its right-click actions and showing a window in place.
 enum DockPreviewPolicy {
     static let liveTick: TimeInterval = 1
@@ -460,6 +458,9 @@ enum LayoutSnapshotPolicy {
     static let longestName = 40
     /// What finds a layout in the search, besides its name.
     static let keywords = "布局 快照 buju kuaizhao layout snapshot"
+    /// Saved layouts can always be found. With none saved, the row that saves one is a command like the others and
+    /// follows their switch.
+    static func listedInSearch(commands: Bool, saved: Int) -> Bool { commands || saved > 0 }
 
     static func decoded(_ data: Data?) -> [LayoutSnapshot] {
         guard let data, let layouts = try? JSONDecoder().decode([LayoutSnapshot].self, from: data) else { return [] }
@@ -687,6 +688,8 @@ enum CrashRestartPolicy {
     }
 }
 
+/// 一瞥 leaves its own process out of the window list. Its settings window joins the switcher through this
+/// entry, so it can be reached again after switching away from it.
 enum SettingsWindowEntry {
     static let id = "glance:settings"
     /// The panel orders a visible settings window out while it is open, which is why "set aside" counts as open.

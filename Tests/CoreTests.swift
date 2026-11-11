@@ -374,6 +374,8 @@ struct CoreTests {
         // In the search.
         check(LaunchKind.layout.action == "执行" && LaunchKind.command.action == "执行", "布局和命令的回车动作")
         check(LaunchKind.layout.place == LaunchKind.command.place, "布局和系统命令排在一起")
+        check(LayoutSnapshotPolicy.listedInSearch(commands: false, saved: 1) && LayoutSnapshotPolicy.listedInSearch(commands: true, saved: 0), "有保存的布局时总能搜到，不看系统命令的开关")
+        check(!LayoutSnapshotPolicy.listedInSearch(commands: false, saved: 0), "没有布局、也关了系统命令时，搜索里不出现布局")
         var result = WindowDescriptor(id: "layout:1", windowID: nil, pid: 0, appName: "Restore Window Layout", bundleID: "", title: "恢复布局：工作", minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
         result.launcher = .layout
         result.subtitle = LayoutSnapshotPolicy.keywords
