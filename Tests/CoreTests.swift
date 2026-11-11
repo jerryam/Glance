@@ -399,6 +399,8 @@ struct CoreTests {
         let notSums = ["123", "-5", "(5)", "pi", "abc", "", " ", "1+", "+", "*2", "(1+2", "1+2)", "2(3)", "2pi", "1 2", "sqrt", "sqrt(", "sqrt 4", "nosuch(1)", "x", "3x", "%",
                        "2024-01-01", "1.2.3", "007+1", "7-zip", "v1.2", "a+b", "微信+1", "一+一", "1/0", "0/0", "sqrt(-1)", "2^99999", "5%0"]
         for text in notSums { check(sum(text) == nil, "不显示计算结果：\(text)") }
+        check(sum("0x10") == nil && sum("0X1f") == nil && sum("1+0x10") == nil, "十六进制的写法不当作算式")
+        check(sum("10x0") == "0" && sum("0 x 5") == "0", "0 仍然可以用 x 相乘")
         let deep = String(repeating: "(", count: 90) + "1+1" + String(repeating: ")", count: 90)
         check(sum(deep) == nil, "括号嵌套太深时不计算，也不会崩溃")
         check(sum(String(repeating: "-", count: 150) + "1+1") == nil, "负号太多时不计算，也不会崩溃")

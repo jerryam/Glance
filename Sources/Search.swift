@@ -363,6 +363,8 @@ enum Calculator {
                 let word = String(characters[index..<end])
                 // 2024-01-01 and 007 are not numbers anyone adds up, and 1.2.3 is not a number at all.
                 guard word.first != "0" || word == "0" || word.hasPrefix("0."), let value = Double(word) else { return nil }
+                // 0x10 is sixteen written another way, not nothing times ten.
+                if word == "0", end < characters.count, characters[end] == "x" { return nil }
                 result.append(.number(value)); index = end; continue
             }
             if character.isLetter, character.isASCII {
