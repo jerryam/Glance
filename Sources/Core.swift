@@ -162,21 +162,23 @@ struct ShortcutProfile: Codable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id); enabled = try c.decode(Bool.self, forKey: .enabled)
         keyCode = try c.decode(UInt32.self, forKey: .keyCode); modifiers = try c.decode(ShortcutModifiers.self, forKey: .modifiers)
-        scope = try c.decode(WindowScope.self, forKey: .scope)
+        // Read with `try?`, here and below: a choice this version does not know, saved by a later one, falls back
+        // alone. Thrown, it would make the whole configuration unreadable.
+        scope = (try? c.decode(WindowScope.self, forKey: .scope)) ?? .all
         currentSpaceOnly = try c.decodeIfPresent(Bool.self, forKey: .currentSpaceOnly) ?? false
         currentScreenOnly = try c.decodeIfPresent(Bool.self, forKey: .currentScreenOnly) ?? false
         keepOpen = try c.decodeIfPresent(Bool.self, forKey: .keepOpen) ?? false
-        release = try c.decodeIfPresent(ReleaseBehavior.self, forKey: .release)
-        spaces = try c.decodeIfPresent(SpaceScope.self, forKey: .spaces)
-        minimized = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .minimized)
-        hidden = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .hidden)
-        fullscreen = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .fullscreen) ?? .show
-        windowless = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .windowless)
-        order = try c.decodeIfPresent(WindowOrder.self, forKey: .order) ?? .recent
-        grouping = try c.decodeIfPresent(WindowGrouping.self, forKey: .grouping) ?? .all
+        release = try? c.decodeIfPresent(ReleaseBehavior.self, forKey: .release)
+        spaces = try? c.decodeIfPresent(SpaceScope.self, forKey: .spaces)
+        minimized = try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .minimized)
+        hidden = try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .hidden)
+        fullscreen = (try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .fullscreen)) ?? .show
+        windowless = try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .windowless)
+        order = (try? c.decodeIfPresent(WindowOrder.self, forKey: .order)) ?? .recent
+        grouping = (try? c.decodeIfPresent(WindowGrouping.self, forKey: .grouping)) ?? .all
         separateTabs = try c.decodeIfPresent(Bool.self, forKey: .separateTabs) ?? false
-        styleOverride = try c.decodeIfPresent(SwitcherStyle.self, forKey: .styleOverride)
-        themeOverride = try c.decodeIfPresent(ThemeChoice.self, forKey: .themeOverride)
+        styleOverride = try? c.decodeIfPresent(SwitcherStyle.self, forKey: .styleOverride)
+        themeOverride = try? c.decodeIfPresent(ThemeChoice.self, forKey: .themeOverride)
         widthOverride = try c.decodeIfPresent(Double.self, forKey: .widthOverride)
         adaptiveOverride = try c.decodeIfPresent(Bool.self, forKey: .adaptiveOverride)
         previewOverride = try c.decodeIfPresent(Bool.self, forKey: .previewOverride)
@@ -224,8 +226,8 @@ struct UserSettings: Codable, Equatable {
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        style = try values.decodeIfPresent(SwitcherStyle.self, forKey: .style) ?? .thumbnails
-        theme = try values.decodeIfPresent(ThemeChoice.self, forKey: .theme) ?? .system
+        style = (try? values.decodeIfPresent(SwitcherStyle.self, forKey: .style)) ?? .thumbnails
+        theme = (try? values.decodeIfPresent(ThemeChoice.self, forKey: .theme)) ?? .system
         adaptiveThumbnails = try values.decodeIfPresent(Bool.self, forKey: .adaptiveThumbnails) ?? true
         thumbnailWidth = try values.decodeIfPresent(Double.self, forKey: .thumbnailWidth) ?? 230
         showMinimized = try values.decodeIfPresent(Bool.self, forKey: .showMinimized) ?? true

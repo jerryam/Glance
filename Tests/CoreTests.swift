@@ -1291,6 +1291,49 @@ struct CoreTests {
         check(UserSettings.salvaged(from: Data("not json".utf8)) == nil, "不是 JSON 的内容无法恢复")
         check(UserSettings.salvaged(from: Data("{\"showHidden\":\"x\"}".utf8)) == nil, "没有任何可用的值时无法恢复")
 
+        // A choice or a list entry from a later version falls back alone: no notice, no defaults for the rest.
+        var custom = UserSettings.defaults
+        custom.exclusions = "com.example.kept"; custom.advanced.showDelay = 250
+        custom.shortcuts[1].currentScreenOnly = true; custom.windowShortcuts.enabled = true
+        var future = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(custom)) as! [String: Any]
+        future["style"] = "以后的样式"; future["theme"] = "以后的主题"
+        var futureAdvanced = future["advanced"] as! [String: Any]
+        for key in ["inputMode", "titleDisplay", "titleCut", "panelScreen", "followCursor", "gesture", "menuIcon"] { futureAdvanced[key] = "以后的选项" }
+        var futureBindings = futureAdvanced["bindings"] as! [[String: Any]]
+        futureBindings.append(["command": "以后的操作", "keyCode": 1])
+        futureAdvanced["bindings"] = futureBindings
+        var futureExceptions = futureAdvanced["exceptions"] as! [[String: Any]]
+        var strange = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(AppException())) as! [String: Any]
+        strange["hide"] = "以后的方式"; strange["bundleID"] = "com.example.later"
+        futureExceptions.append(strange)
+        futureAdvanced["exceptions"] = futureExceptions
+        future["advanced"] = futureAdvanced
+        var futureProfiles = future["shortcuts"] as! [[String: Any]]
+        for key in ["scope", "order", "release", "fullscreen", "grouping", "styleOverride"] { futureProfiles[0][key] = "以后的选项" }
+        future["shortcuts"] = futureProfiles
+        var futureWindowShortcuts = future["windowShortcuts"] as! [String: Any]
+        var futureList = futureWindowShortcuts["shortcuts"] as! [[String: Any]]
+        var unknownShortcut = futureList[0]
+        unknownShortcut["command"] = "以后的排列"
+        futureList.append(unknownShortcut)
+        futureWindowShortcuts["shortcuts"] = futureList
+        future["windowShortcuts"] = futureWindowShortcuts
+        let read = try? JSONDecoder().decode(UserSettings.self, from: JSONSerialization.data(withJSONObject: future))
+        check(read != nil, "有以后版本才认识的选项时，整份设置仍然读得出来")
+        check(read?.style == .thumbnails && read?.theme == .system, "不认识的样式和主题回到默认值")
+        check(read?.advanced.inputMode == .search && read?.advanced.menuIcon == .outline, "不认识的选项回到默认值")
+        check(read?.advanced.titleDisplay == .window && read?.advanced.gesture == .disabled, "每个选项各自回到默认值")
+        check(read?.exclusions == "com.example.kept" && read?.advanced.showDelay == 250, "其他设置保留")
+        check(read?.advanced.bindings == custom.advanced.bindings, "不认识的面板操作单独去掉，其余按键保留")
+        check(read?.advanced.exceptions == custom.advanced.exceptions, "读不出来的例外规则单独去掉，其余保留")
+        let firstProfile = read?.shortcuts.first
+        check(firstProfile?.scope == .all && firstProfile?.order == .recent && firstProfile?.grouping == .all, "方案里不认识的选项回到默认值")
+        check(firstProfile?.release == nil && firstProfile?.styleOverride == nil && firstProfile?.fullscreen == .show, "方案里可以不填的选项回到未设置")
+        check(firstProfile?.keyCode == custom.shortcuts[0].keyCode && firstProfile?.modifiers == custom.shortcuts[0].modifiers, "方案的快捷键保留")
+        check(read?.shortcuts.count == 9 && read?.shortcuts[1].currentScreenOnly == true, "其他方案不受影响")
+        check(read?.windowShortcuts.enabled == true && read?.windowShortcuts.shortcuts == custom.windowShortcuts.shortcuts, "不认识的窗口快捷键单独去掉，其余和开关保留")
+        check(read?.validationError() == nil, "这样读出来的设置有效")
+
         func pinWindow(_ id: String, _ windowID: UInt32?, pid: Int32, bundle: String = "com.apple.Safari", title: String) -> WindowDescriptor {
             WindowDescriptor(id: id, windowID: windowID, pid: pid, appName: "Safari", bundleID: bundle, title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
         }

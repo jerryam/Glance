@@ -251,7 +251,9 @@ struct WindowShortcutSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         var saved: [WindowLayoutCommand: WindowShortcut] = [:]
-        for shortcut in try c.decodeIfPresent([WindowShortcut].self, forKey: .shortcuts) ?? [] where saved[shortcut.command] == nil {
+        // A shortcut for a command this version does not have is left out alone, and the others are kept.
+        let listed = (try? c.decodeIfPresent([TolerantElement<WindowShortcut>].self, forKey: .shortcuts))?.compactMap { $0.value } ?? []
+        for shortcut in listed where saved[shortcut.command] == nil {
             saved[shortcut.command] = shortcut
         }
         // One per command, in a fixed order. A command added later starts on its own key, unless that key is taken.
@@ -326,6 +328,13 @@ enum ShuangpinScheme: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// One entry of a saved list. An entry this version cannot read, such as a command a later version added, is left
+/// out alone: thrown, it would take the rest of the list and every other setting with it.
+struct TolerantElement<Value: Decodable>: Decodable {
+    let value: Value?
+    init(from decoder: Decoder) throws { value = try? Value(from: decoder) }
+}
+
 struct AdvancedSettings: Codable, Equatable {
     var preferencesRevision = 2
     var inputMode: PanelInputMode = .search
@@ -388,7 +397,8 @@ struct AdvancedSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let revision = try c.decodeIfPresent(Int.self, forKey: .preferencesRevision) ?? 0
         preferencesRevision = max(2, revision)
-        inputMode = try c.decodeIfPresent(PanelInputMode.self, forKey: .inputMode) ?? .search
+        // Read with `try?`, here and below: a choice this version does not know, saved by a later one, falls back alone.
+        inputMode = (try? c.decodeIfPresent(PanelInputMode.self, forKey: .inputMode)) ?? .search
         searchRanking = try c.decodeIfPresent(Bool.self, forKey: .searchRanking) ?? true
         searchTypos = try c.decodeIfPresent(Bool.self, forKey: .searchTypos) ?? true
         searchLearning = try c.decodeIfPresent(Bool.self, forKey: .searchLearning) ?? true
@@ -405,7 +415,7 @@ struct AdvancedSettings: Codable, Equatable {
         shiftSelectsPrevious = try c.decodeIfPresent(Bool.self, forKey: .shiftSelectsPrevious) ?? true
         voiceOverKeepsOpen = try c.decodeIfPresent(Bool.self, forKey: .voiceOverKeepsOpen) ?? true
         gestureAvoidsSystem = try c.decodeIfPresent(Bool.self, forKey: .gestureAvoidsSystem) ?? false
-        independentGesture = try c.decodeIfPresent(ShortcutProfile.self, forKey: .independentGesture)
+        independentGesture = try? c.decodeIfPresent(ShortcutProfile.self, forKey: .independentGesture)
         focusMethod = (try? c.decodeIfPresent(FocusMethod.self, forKey: .focusMethod)) ?? .windowServer
         // Before 1.6 the command port was always open; it now starts closed until enabled in 设置 › 通用.
         commandLineEnabled = try c.decodeIfPresent(Bool.self, forKey: .commandLineEnabled) ?? false
@@ -415,11 +425,11 @@ struct AdvancedSettings: Codable, Equatable {
         searchApps = try c.decodeIfPresent(Bool.self, forKey: .searchApps) ?? true
         searchSettingsPages = try c.decodeIfPresent(Bool.self, forKey: .searchSettingsPages) ?? true
         numberHints = try c.decodeIfPresent(Bool.self, forKey: .numberHints) ?? true
-        titleDisplay = try c.decodeIfPresent(TitleDisplay.self, forKey: .titleDisplay) ?? .window
-        titleCut = try c.decodeIfPresent(TitleCut.self, forKey: .titleCut) ?? .end
-        panelScreen = try c.decodeIfPresent(PanelScreen.self, forKey: .panelScreen) ?? .active
-        followCursor = try c.decodeIfPresent(FollowCursor.self, forKey: .followCursor) ?? .never
-        gesture = try c.decodeIfPresent(GestureChoice.self, forKey: .gesture) ?? .disabled
+        titleDisplay = (try? c.decodeIfPresent(TitleDisplay.self, forKey: .titleDisplay)) ?? .window
+        titleCut = (try? c.decodeIfPresent(TitleCut.self, forKey: .titleCut)) ?? .end
+        panelScreen = (try? c.decodeIfPresent(PanelScreen.self, forKey: .panelScreen)) ?? .active
+        followCursor = (try? c.decodeIfPresent(FollowCursor.self, forKey: .followCursor)) ?? .never
+        gesture = (try? c.decodeIfPresent(GestureChoice.self, forKey: .gesture)) ?? .disabled
         gestureProfile = try c.decodeIfPresent(Int.self, forKey: .gestureProfile) ?? 0
         haptics = try c.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
         arrowKeys = try c.decodeIfPresent(Bool.self, forKey: .arrowKeys) ?? true
@@ -430,16 +440,17 @@ struct AdvancedSettings: Codable, Equatable {
         spaceNumbers = try c.decodeIfPresent(Bool.self, forKey: .spaceNumbers) ?? false
         tileButtons = try c.decodeIfPresent(Bool.self, forKey: .tileButtons) ?? true
         showMenuIcon = try c.decodeIfPresent(Bool.self, forKey: .showMenuIcon) ?? true
-        menuIcon = try c.decodeIfPresent(MenuIconChoice.self, forKey: .menuIcon) ?? .outline
+        menuIcon = (try? c.decodeIfPresent(MenuIconChoice.self, forKey: .menuIcon)) ?? .outline
         showDelay = try c.decodeIfPresent(Int.self, forKey: .showDelay) ?? 100
         fadeOut = try c.decodeIfPresent(Bool.self, forKey: .fadeOut) ?? false
         previewFadeIn = try c.decodeIfPresent(Bool.self, forKey: .previewFadeIn) ?? true
-        bindings = try c.decodeIfPresent([PanelBinding].self, forKey: .bindings) ?? PanelBinding.defaults
+        // An entry that cannot be read, such as a command from a later version, is left out alone.
+        bindings = (try? c.decodeIfPresent([TolerantElement<PanelBinding>].self, forKey: .bindings))?.compactMap { $0.value } ?? PanelBinding.defaults
         for var binding in PanelBinding.defaults where !bindings.contains(where: { $0.command == binding.command }) {
             if bindings.contains(where: { $0.enabled && $0.keyCode == binding.keyCode && $0.modifiers == binding.modifiers }) { binding.enabled = false }
             bindings.append(binding)
         }
-        exceptions = try c.decodeIfPresent([AppException].self, forKey: .exceptions) ?? AppException.defaults
+        exceptions = (try? c.decodeIfPresent([TolerantElement<AppException>].self, forKey: .exceptions))?.compactMap { $0.value } ?? AppException.defaults
         if revision < 2 && !exceptions.contains(where: { $0.matches(bundle: "com.netease.uuremote") }) {
             exceptions.append(.uuRemote)
         }
