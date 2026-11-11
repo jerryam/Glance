@@ -1022,14 +1022,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch FocusFailurePolicy.action(fromCache: fromCache, loading: state.loading) {
         case .waitForFreshList:
             pendingCommit = true; pendingFocusID = selected.id
-            if panelOrderDeferred { panelOrderDeferred = false; orderPanelFront() }
+            showDeferredPanel()
         case .commitFreshList:
             confirm()
+            // The fresh list may hold nothing to switch to, and a panel that stays open has to be seen. It stays
+            // hidden only while another attempt is on its way.
+            if showing, showGeneration == generation, !focusInFlight, !state.actionPending { showDeferredPanel() }
         case .report:
             pendingCommit = false; state.sticky = true; state.setMessage(error, error: true); relayout()
             panelOrderDeferred = false
             orderPanelFront()
         }
+        // A press of the shortcut during the switch was kept for the panel that would open after it. The switch
+        // failed: with another attempt on its way the press waits again, and otherwise it counts now, moving the
+        // selection of the panel that stayed open or opening a new one.
+        if let nextTrigger {
+            if showing, showGeneration == generation, focusInFlight { triggerAfterFocus = nextTrigger }
+            else { trigger(index: nextTrigger.index, reverse: nextTrigger.reverse) }
+        }
+    }
+    /// The panel whose show delay ran out during a switch, now that the switch will not close it.
+    private func showDeferredPanel() {
+        guard panelOrderDeferred else { return }
+        panelOrderDeferred = false
+        orderPanelFront()
     }
     /// 设置 › 鼠标与触控板 › 切换后移动鼠标.
     private func moveCursorIfAsked(to selected: WindowHandle) {
