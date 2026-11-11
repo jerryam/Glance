@@ -48,6 +48,10 @@ jobs:
       - name: Build and run the core checks
         run: ./build.sh
 
+      # Read, not judged: times on a shared machine vary too much to fail a build over.
+      - name: Time the search
+        run: ./scripts/search-benchmark.sh search-benchmark.json
+
       # build.sh only prints a note when the Liquid Glass icon fails to compile, and carries on.
       - name: Check the Liquid Glass icon
         run: test -f Glance.app/Contents/Resources/Assets.car
