@@ -416,6 +416,23 @@ enum DockPreviewPolicy {
     static func sameCards(_ a: [WindowDescriptor], _ b: [WindowDescriptor]) -> Bool {
         a.map { "\($0.id)|\($0.minimized)|\($0.hidden)" } == b.map { "\($0.id)|\($0.minimized)|\($0.hidden)" }
     }
+
+    /// The card under the pointer after the list was read again. Only the same cards in the same order are known to
+    /// be where they were. After anything else the pointer may be on another card, and saying nothing is the safe
+    /// answer: a middle click closes the card this names.
+    static func hoverAfterRefresh(_ hovered: String?, old: [String], new: [String]) -> String? {
+        guard let hovered, old == new, new.contains(hovered) else { return nil }
+        return hovered
+    }
+
+    /// The size of a card's picture made from a full-size frame, within the limits of a picture captured for the
+    /// card: no wider than the cards need, no taller than four thirds of that, and never enlarged.
+    static func thumbnailSize(width: Int, height: Int, pixelWidth: Int) -> (width: Int, height: Int)? {
+        guard width > 0, height > 0 else { return nil }
+        let widest = Double(min(width, min(1280, max(320, pixelWidth))))
+        let scale = min(widest / Double(width), widest * 4 / 3 / Double(height))
+        return (max(1, Int((Double(width) * scale).rounded())), max(1, Int((Double(height) * scale).rounded())))
+    }
 }
 
 /// Where the windows were when the user asked to remember it. Unlike everything else 一瞥 keeps, this holds window

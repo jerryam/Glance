@@ -716,6 +716,22 @@ struct CoreTests {
         check(!p.sameCards([window("a")], [window("a", hidden: true)]), "应用隐藏后卡片要更新")
         check(!p.sameCards([window("a"), window("b")], [window("a")]), "窗口关闭后卡片要更新")
 
+        // The card under the pointer after the list is read again.
+        check(p.hoverAfterRefresh("b", old: ["a", "b"], new: ["a", "b"]) == "b", "卡片没有变时，指针仍在同一张卡片上")
+        check(p.hoverAfterRefresh("b", old: ["a", "b", "c"], new: ["b", "c"]) == nil, "卡片挪了位置以后，不再认定指针还在原来那张上")
+        check(p.hoverAfterRefresh("b", old: ["a", "b"], new: ["b", "a"]) == nil, "卡片换了顺序也一样")
+        check(p.hoverAfterRefresh(nil, old: ["a"], new: ["a"]) == nil && p.hoverAfterRefresh("x", old: ["a"], new: ["a"]) == nil, "原来不在卡片上，刷新后也不在")
+
+        // A card's picture made from the full-size frame.
+        func small(_ width: Int, _ height: Int, _ pixels: Int) -> [Int]? {
+            p.thumbnailSize(width: width, height: height, pixelWidth: pixels).map { [$0.width, $0.height] }
+        }
+        check(small(3200, 2000, 640) == [640, 400], "整窗截图按卡片需要的宽度缩小")
+        check(small(300, 200, 640) == [300, 200], "比卡片小的截图不放大")
+        check(small(3200, 2000, 100) == [320, 200] && small(3200, 2000, 5000) == [1280, 800], "宽度的上下限和直接截的缩略图相同")
+        check(small(1000, 4000, 640) == [213, 853], "很高的窗口按高度的限制缩小")
+        check(small(0, 100, 640) == nil && small(100, 0, 640) == nil, "尺寸不合理时不生成")
+
         // Findable in settings.
         check(SettingSearchIndex.results("实时更新预览图").first?.section == 3 && SettingSearchIndex.results("悬停时在窗口原来的位置显示它").first?.section == 3, "新开关可以在设置搜索里找到")
     }

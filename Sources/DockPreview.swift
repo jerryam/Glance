@@ -343,8 +343,10 @@ final class DockPreviewController {
         state.appIcon = target.icon ?? items.first?.icon
         state.message = ""
         state.canCapture = CGPreflightScreenCaptureAccess()
-        // A refresh of the same app leaves the pointer on the same card.
-        if let hovered = state.hoveredID, !items.contains(where: { $0.id == hovered }) { state.hoveredID = nil }
+        // The pointer is known to be on the same card only while the cards are the same ones in the same places.
+        // After any other change it is unknown until the pointer moves, and a middle click must not guess.
+        let hovered = DockPreviewPolicy.hoverAfterRefresh(state.hoveredID, old: state.items.map(\.id), new: items.map(\.id))
+        if hovered != state.hoveredID { state.hoveredID = hovered }
         state.showsTitles = showsTitles(items, target: target)
         state.items = items
         var images: [String: NSImage] = [:]
@@ -532,12 +534,14 @@ final class DockPreviewController {
         // A panel left open with nobody at the machine should not keep capturing.
         guard now - lastPointerMove < DockPreviewPolicy.liveIdleLimit else { return }
         let hovered = state.hoveredID
+        // The window shown at its own place gets a full-size frame below, and its card's picture is made from that.
+        let peeking: String? = (peekedID != nil && peekedID == hovered && peekPanel?.isVisible == true) ? peekedID : nil
         for id in DockPreviewPolicy.dueForRefresh(state.items.map(\.descriptor), hovered: hovered, capturedAt: capturedAt, now: now) {
             guard let handle = state.items.first(where: { $0.id == id }) else { continue }
             capturedAt[id] = now
-            capture.request(handle, urgent: id == hovered)
+            if id != peeking { capture.request(handle, urgent: id == hovered) }
         }
-        if let peekedID, peekedID == hovered, peekPanel?.isVisible == true, let handle = state.items.first(where: { $0.id == peekedID }) {
+        if let peeking, let handle = state.items.first(where: { $0.id == peeking }) {
             capture.request(handle, urgent: true, full: true)
         }
     }
@@ -574,6 +578,22 @@ final class DockPreviewController {
         peekImage?.image = image
         peek.setFrame(Self.cocoaRect(CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)), display: true)
         peek.orderFrontRegardless()
+        if let small = Self.thumbnail(from: image, pixelWidth: capture.thumbnailPixelWidth) {
+            storeImage?(id, small)
+            state.images[id] = small
+        }
+    }
+
+    /// A card's picture from a full-size frame, so the window is not captured a second time for its card.
+    private static func thumbnail(from image: NSImage, pixelWidth: Int) -> NSImage? {
+        guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let size = DockPreviewPolicy.thumbnailSize(width: source.width, height: source.height, pixelWidth: pixelWidth),
+              let context = CGContext(data: nil, width: size.width, height: size.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(source, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
+        return context.makeImage().map { NSImage(cgImage: $0, size: .zero) }
     }
 
     private func hidePeek() {
