@@ -3,7 +3,8 @@ import ScreenCaptureKit
 
 /// A development check for the interface: `Glance --ui-snapshots <folder>` shows each settings page and
 /// the demo panel in light and dark appearance, in front of a plain backdrop, and saves pictures of them.
-/// The capture includes only 一瞥's own windows; nothing else on the screen is recorded.
+/// The capture includes only 一瞥's own windows; nothing else on the screen is recorded. Without Screen Recording,
+/// as on a build machine, each window draws itself into its picture instead: `scripts/ui-snapshots-check.sh`.
 extension AppDelegate {
     private struct SnapshotStep {
         var name: String?
@@ -60,19 +61,26 @@ extension AppDelegate {
                 return self.panel
             })
         }
-        var written: [String] = []
+        let canCapture = CGPreflightScreenCaptureAccess()
+        var written: [String] = [], missing: [String] = [], drawn = 0
         func run(_ position: Int) {
             guard position < steps.count else {
                 dismiss(); settingsWindow?.orderOut(nil); backdrop.orderOut(nil)
                 state.query = ""; state.searchVisible = false
                 NSApp.appearance = nil
                 applySettings()
-                try? (written.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("done.txt"), atomically: true, encoding: .utf8)
+                var report = written
+                if drawn > 0 {
+                    report.append("drawn without Screen Recording: \(drawn) of \(written.count). These show each window's own drawing, without glass, shadow or backdrop.")
+                }
+                report += missing.map { "missing: \($0)" }
+                try? (report.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("done.txt"), atomically: true, encoding: .utf8)
                 return
             }
             let step = steps[position]
             let target = step.prepare()
-            guard let name = step.name, let target else { run(position + 1); return }
+            guard let name = step.name else { run(position + 1); return }
+            guard let target else { missing.append(name + ".png"); run(position + 1); return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                 guard let self else { return }
                 let area = target.frame.insetBy(dx: -40, dy: -40)
@@ -81,14 +89,41 @@ extension AppDelegate {
                 backdrop.order(.below, relativeTo: target.windowNumber)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     let url = folder.appendingPathComponent(name + ".png")
-                    self.captureOwnWindows([backdrop, target], area: area, to: url) { saved in
-                        if saved { written.append(url.lastPathComponent) }
+                    let finish: (Bool) -> Void = { captured in
+                        if captured { written.append(url.lastPathComponent) }
+                        else if Self.drawWindow(target, to: url) { written.append(url.lastPathComponent); drawn += 1 }
+                        else { missing.append(url.lastPathComponent) }
                         run(position + 1)
                     }
+                    if canCapture { self.captureOwnWindows([backdrop, target], area: area, to: url, completion: finish) } else { finish(false) }
                 }
             }
         }
         run(0)
+    }
+
+    /// The window as it draws itself, frame and contents, on the window's own background colour. It stands in for a
+    /// capture of the screen where there is no permission to make one.
+    private static func drawWindow(_ window: NSWindow, to url: URL) -> Bool {
+        guard let view = window.contentView?.superview ?? window.contentView else { return false }
+        let bounds = view.bounds
+        guard bounds.width >= 1, bounds.height >= 1, let cached = view.bitmapImageRepForCachingDisplay(in: bounds) else { return false }
+        view.cacheDisplay(in: bounds, to: cached)
+        guard let flat = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: cached.pixelsWide, pixelsHigh: cached.pixelsHigh, bitsPerSample: 8, samplesPerPixel: 4,
+                                          hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return false }
+        // In points before the context is made, so that drawing in points fills every pixel.
+        flat.size = bounds.size
+        let area = NSRect(origin: .zero, size: bounds.size)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: flat)
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSColor.windowBackgroundColor.setFill()
+            NSBezierPath(rect: area).fill()
+        }
+        _ = cached.draw(in: area)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = flat.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: url)) != nil
     }
 
     /// The app icon as Finder shows it, at 512 pixels, in the current appearance.

@@ -62,6 +62,20 @@ jobs:
           path: Glance.zip
           retention-days: 7
 
-      # Runs the built app: the only step that does. Last, so a failure here still leaves the build to look at.
+      # The steps from here on run the built app. After the upload, so a failure here still leaves the build to look at.
       - name: Check that a crash reopens the app
         run: ./scripts/crash-restart-check.sh
+
+      # Opens every settings page and the panel and saves a picture of each. A page that crashes or hangs the app fails here.
+      - name: Check that every settings page and the panel can be drawn
+        run: ./scripts/ui-snapshots-check.sh
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: Checks-${{ github.sha }}
+          path: |
+            ui-snapshots/
+            search-benchmark.json
+          if-no-files-found: ignore
+          retention-days: 7
