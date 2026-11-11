@@ -273,6 +273,7 @@ struct CoreTests {
         verifyPinsAndRecovery()
         verifyOptimizations()
         verifyThreading()
+        verifyStaleLists()
         verifyWindowShortcuts()
         verifySettingsEntry()
         verifyRecentOrder()
@@ -1244,6 +1245,23 @@ struct CoreTests {
         var waits = 0
         while !thread.isFinished && waits < 500 { Thread.sleep(forTimeInterval: 0.01); waits += 1 }
         check(thread.isFinished, "结束后线程退出")
+    }
+    static func verifyStaleLists() {
+        // An app that misses a read's deadline answers late, perhaps after a newer read, perhaps during one.
+        var ledger = ScanLedger()
+        let firstRead = ledger.begin(), firstMark = ledger.mark
+        check(ledger.finish(read: firstRead, answered: [7], unanswered: [9], since: firstMark, running: [7, 9]).isEmpty, "没有迟到的回答时，这次读取的结果照常使用")
+        let secondRead = ledger.begin(), secondMark = ledger.mark
+        check(ledger.adoptLate(pid: 9, from: firstRead), "应用迟到的回答比列表里的旧内容新，可以采用")
+        check(ledger.finish(read: secondRead, answered: [7], unanswered: [9], since: secondMark, running: [7, 9]) == [9], "读取期间到达的迟到回答，不被这次读取手里的旧副本盖掉")
+        let thirdRead = ledger.begin(), thirdMark = ledger.mark
+        check(ledger.finish(read: thirdRead, answered: [7, 9], unanswered: [], since: thirdMark, running: [7, 9]).isEmpty, "应用按时回答时，用这次读到的内容")
+        check(!ledger.adoptLate(pid: 9, from: secondRead), "更早一次读取的迟到回答，不覆盖之后读到的内容")
+        check(!ledger.adoptLate(pid: 9, from: thirdRead), "已经按时回答的那次读取，不会再被当成迟到采用")
+        let fourthRead = ledger.begin()
+        check(ledger.adoptLate(pid: 9, from: fourthRead), "最新一次读取的迟到回答可以采用")
+        check(!ledger.adoptLate(pid: 9, from: fourthRead), "同一个回答不采用两次")
+        check(ledger.adoptLate(pid: 12, from: firstRead), "列表里从没有过的应用，迟到的回答总是可以采用")
     }
     static func verifyOptimizations() {
         check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: false), "列表刚读过且没有新事件时，快速松键直接切换")

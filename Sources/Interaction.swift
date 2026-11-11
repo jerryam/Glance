@@ -1194,6 +1194,31 @@ enum FocusFailurePolicy {
     }
 }
 
+/// Which read each app's windows in the list came from. An app that misses a read's deadline answers late, and that
+/// answer can arrive after a newer read has finished, or while one is under way. Neither may undo the newer one.
+struct ScanLedger {
+    private var sources: [Int32: Int] = [:]
+    private var reads = 0
+    /// The number of a new read.
+    mutating func begin() -> Int { reads += 1; return reads }
+    /// Taken when a read starts, for `finish` to see what arrived while it was under way.
+    var mark: [Int32: Int] { sources }
+    /// A late answer from `read` replaces the app's windows only when the list holds nothing newer.
+    mutating func adoptLate(pid: Int32, from read: Int) -> Bool {
+        guard read > (sources[pid] ?? 0) else { return false }
+        sources[pid] = read
+        return true
+    }
+    /// A read has finished. The apps returned keep the windows the list has now: they did not answer this read, and
+    /// a late answer of theirs arrived after the read took its copy of the list.
+    mutating func finish(read: Int, answered: Set<Int32>, unanswered: Set<Int32>, since mark: [Int32: Int], running: Set<Int32>) -> Set<Int32> {
+        let kept = unanswered.filter { (sources[$0] ?? 0) != (mark[$0] ?? 0) }
+        for pid in answered where read > (sources[pid] ?? 0) { sources[pid] = read }
+        sources = sources.filter { running.contains($0.key) }
+        return kept
+    }
+}
+
 /// A thread that only runs a run loop, for event sources whose callbacks must not wait for the main thread.
 final class BackgroundRunLoop: Thread {
     private let ready = DispatchSemaphore(value: 0)

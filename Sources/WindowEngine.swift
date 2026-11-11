@@ -150,6 +150,8 @@ final class WindowEngine: ObservableObject {
     private(set) var suppressedSurfaceCount = 0
     private(set) var unavailableWindowListCount = 0
     private(set) var lateScanCount = 0
+    /// Which read each app's windows came from, so an answer that arrives late never replaces a newer one.
+    private var scanLedger = ScanLedger()
     /// Window and app events so far, and how many of them the last finished read could have seen.
     private var cacheEvents = 0
     private var cacheEventsRead = 0
@@ -260,7 +262,11 @@ final class WindowEngine: ObservableObject {
             for handle in windows where handle.ax.map({ CFEqual($0, window) }) == true {
                 if let id = handle.descriptor.windowID { WindowControl.forgetFrame(of: id) }
             }
+            let listed = windows.count
             windows.removeAll { handle in handle.ax.map { CFEqual($0, window) } == true }
+            // A read under way may still hold the closed window and put it back, and an app left without windows gets
+            // an entry of its own only from a read. Other elements report this too, and those change nothing here.
+            if windows.count != listed { markCacheStale() }
             axThread.perform { [weak self] in
                 guard let self else { return }
                 for pid in Array(self.watchedWindows.keys) { self.watchedWindows[pid]?.removeAll { CFEqual($0, window) } }
@@ -410,9 +416,11 @@ final class WindowEngine: ObservableObject {
     }
     /// The answer of an app that missed the deadline. The next refresh starts from it, and an open panel
     /// hears about it only when the app's windows really changed, so a slow app cannot keep it refreshing.
-    private func adoptLateScan(pid: Int32, handles: [WindowHandle]) {
+    private func adoptLateScan(pid: Int32, handles: [WindowHandle], read: Int) {
         lateScanCount += 1
         guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        // A later read has heard from this app since, and what it found is newer.
+        guard scanLedger.adoptLate(pid: pid, from: read) else { return }
         let before = Set(windows.filter { $0.descriptor.pid == pid }.map(\.id))
         windows = windows.filter { $0.descriptor.pid != pid } + handles
         for handle in handles where firstSeen[handle.id] == nil { firstSeen[handle.id] = handle.descriptor.created }
@@ -429,6 +437,7 @@ final class WindowEngine: ObservableObject {
         let start = ProcessInfo.processInfo.systemUptime
         refreshing = true
         let eventsBeforeRead = cacheEvents
+        let read = scanLedger.begin(), ledgerMark = scanLedger.mark
         let trusted = AXIsProcessTrusted()
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier != ownPID }.map {
@@ -559,15 +568,18 @@ final class WindowEngine: ObservableObject {
                 DispatchQueue.concurrentPerform(iterations: apps.count) { index in
                     let scanned = scan(apps[index])
                     if !slots.store(scanned, at: index) && !scanned.timedOut {
-                        DispatchQueue.main.async { [weak self] in self?.adoptLateScan(pid: apps[index].pid, handles: scanned.handles) }
+                        DispatchQueue.main.async { [weak self] in self?.adoptLateScan(pid: apps[index].pid, handles: scanned.handles, read: read) }
                     }
                 }
                 finished.leave()
             }
             _ = finished.wait(timeout: .now() + Self.scanDeadline)
             let answers = slots.close()
+            var answered = Set<Int32>(), unanswered = Set<Int32>()
             for (index, app) in apps.enumerated() {
-                let scanned = answers[index].flatMap { $0.timedOut ? nil : $0 } ?? lastKnown(app)
+                let inTime: AppScan? = answers[index].flatMap { $0.timedOut ? nil : $0 }
+                if inTime == nil { unanswered.insert(app.pid) } else { answered.insert(app.pid) }
+                let scanned = inTime ?? lastKnown(app)
                 handles += scanned.handles
                 if currentID == nil { currentID = scanned.currentID }
                 suppressedSurfaces += scanned.suppressed; unavailableWindowLists += scanned.unavailable
@@ -577,7 +589,7 @@ final class WindowEngine: ObservableObject {
                 let old = handles[index]; var d = old.descriptor; d.lastFocused = Date.timeIntervalSinceReferenceDate
                 handles[index] = WindowHandle(descriptor: d, ax: old.ax, icon: old.icon, tab: old.tab)
             }
-            handles.sort { a, b in
+            let inOrder: (WindowHandle, WindowHandle) -> Bool = { a, b in
                 if a.descriptor.windowless != b.descriptor.windowless { return !a.descriptor.windowless }
                 if a.id == front { return b.id != front }
                 if b.id == front { return false }
@@ -588,9 +600,16 @@ final class WindowEngine: ObservableObject {
                 if ai != bi { return ai < bi }
                 return a.id < b.id
             }
-            let result = handles
+            handles.sort(by: inOrder)
+            let sorted = handles, answeredApps = answered, unansweredApps = unanswered
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // An app that missed the deadline may have answered while this read was still under way. Its answer
+                // is in the list already, and is newer than the copy this read fell back on. It takes its place in
+                // the same order as the rest.
+                let late = self.scanLedger.finish(read: read, answered: answeredApps, unanswered: unansweredApps, since: ledgerMark,
+                                                  running: Set(apps.map(\.pid)))
+                let result = late.isEmpty ? sorted : Self.keeping(late, from: self.windows, in: sorted).sorted(by: inOrder)
                 let ids = Set(result.map(\.id))
                 self.firstSeen = self.firstSeen.filter { ids.contains($0.key) }
                 for handle in result where self.firstSeen[handle.id] == nil { self.firstSeen[handle.id] = handle.descriptor.created }
@@ -610,6 +629,10 @@ final class WindowEngine: ObservableObject {
                 }
             }
         }
+    }
+    /// The list a read produced, with the windows of `apps` taken from the current list instead.
+    private static func keeping(_ apps: Set<Int32>, from current: [WindowHandle], in read: [WindowHandle]) -> [WindowHandle] {
+        read.filter { !apps.contains($0.descriptor.pid) } + current.filter { apps.contains($0.descriptor.pid) }
     }
     private static func matchScore(_ cg: CGEntry, title: String, frame: CGRect) -> Double {
         let delta = abs(cg.frame.minX - frame.minX) + abs(cg.frame.minY - frame.minY) + abs(cg.frame.width - frame.width) + abs(cg.frame.height - frame.height)
@@ -855,6 +878,19 @@ enum WindowControl {
         let matches = windows.filter { (axAttribute($0, kAXTitleAttribute) as? String) == handle.descriptor.title }
         return matches.count == 1 ? matches[0] : nil
     }
+    /// The element the app has for this window now, by window number alone: a title may belong to another window.
+    private static func currentElement(for handle: WindowHandle) -> AXUIElement? {
+        guard let id = handle.descriptor.windowID else { return nil }
+        let app = AXUIElementCreateApplication(handle.descriptor.pid); AXUIElementSetMessagingTimeout(app, 0.2)
+        let windows = axAttribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        return windows.first(where: { NativeBridge.windowID($0) == id })
+    }
+    /// Whether the window server still has a window with this number. It reads every window, so it is asked only
+    /// when an element has gone and the app lists nothing in its place.
+    private static func windowServerHas(_ id: UInt32) -> Bool {
+        let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+        return info.contains { $0[kCGWindowNumber as String] as? UInt32 == id }
+    }
     /// A browser switches tabs in a script that runs in another process, so the answer arrives later: nil when
     /// the tab is in front, otherwise what to tell the user. Always on the main queue.
     static func focusBrowserTab(_ handle: WindowHandle, completion: @escaping (String?) -> Void) {
@@ -873,11 +909,32 @@ enum WindowControl {
         if action == .hideApp { return (app.isHidden ? app.unhide() : app.hide()) ? nil : "应用没有接受隐藏或显示请求。" }
         if handle.browserTab != nil { return "浏览器标签页请先切换过去，再在浏览器里操作。" }
         guard AXIsProcessTrusted() else { return "请先为“一瞥”开启辅助功能权限。" }
-        let ax = element(for: handle)
+        var ax = element(for: handle)
         if let ax { AXUIElementSetMessagingTimeout(ax, 0.15) }
         if action == .focus {
             // Reject an unbound surface before yielding key focus to another application.
             if !handle.descriptor.windowless && ax == nil { return "这个窗口已关闭或暂时不可切换，请重新选择。" }
+            // The list may be a moment old, and the window may have closed since. Its element says so in the same
+            // answer that tells whether it is minimized. The window server takes a closed window's number without
+            // complaint, and then nothing comes to the front. An app that does not answer is not held against the
+            // window: the window server can still bring it forward.
+            var minimized = false
+            if let listed = ax {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(listed, kAXMinimizedAttribute as CFString, &value) == .invalidUIElement {
+                    value = nil
+                    if let again = currentElement(for: handle) {
+                        // The app made a new element for a window that is still there.
+                        AXUIElementSetMessagingTimeout(again, 0.15)
+                        ax = again
+                        value = axAttribute(again, kAXMinimizedAttribute)
+                    } else {
+                        let known = handle.descriptor.windowID.map { windowServerHas($0) } ?? false
+                        if !known { return "这个窗口已经关闭，请重新选择。" }
+                    }
+                }
+                minimized = (value as? NSNumber)?.boolValue == true
+            }
             app.unhide()
             if handle.descriptor.windowless, let url = app.bundleURL {
                 yieldActivation(to: app)
@@ -887,8 +944,7 @@ enum WindowControl {
                 AXUIElementSetMessagingTimeout(tab, 0.15)
                 if AXUIElementPerformAction(tab, kAXPressAction as CFString) != .success { return "这个标签页已变化，请重新打开切换面板。" }
             }
-            if let ax, (axAttribute(ax, kAXMinimizedAttribute) as? NSNumber)?.boolValue == true,
-               AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success {
+            if let ax, minimized, AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success {
                 return "这个窗口暂时无法还原。"
             }
             if preferWindowServer, let windowID = handle.descriptor.windowID,
