@@ -222,6 +222,8 @@ final class LaunchCatalog {
                 }
             }
         }
+        // Safari is on a system volume of its own, in none of the folders above. Launch Services knows where.
+        if let safari = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") { consider(safari) }
         return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 

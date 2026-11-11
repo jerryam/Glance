@@ -194,17 +194,19 @@ extension AppDelegate {
             let apps = entries.filter { $0.kind == .app }, pages = entries.filter { $0.kind == .setting }
             var report: [String: Any] = [
                 "apps": apps.count, "settingsPages": pages.count,
-                "appSamples": apps.prefix(60).map { "\($0.name)\($0.alias.map { " / \($0)" } ?? "") [\($0.bundleID)]" },
+                "appSamples": apps.prefix(300).map { "\($0.name)\($0.alias.map { " / \($0)" } ?? "") [\($0.bundleID)]" },
                 "settingsSamples": pages.map { "\($0.name)\($0.alias.map { " / \($0)" } ?? "") [\($0.bundleID)]" },
             ]
             let results = self.launcher.results(apps: true, settingsPages: true)
             var queries: [String: [String]] = [:]
-            for query in ["wx", "weixin", "wechat", "蓝牙", "bluetooth", "lanya", "wifi", "safari", "jsq", "terminal", "zd", "显示器", "lock screen", "date", "mouse"] {
+            for query in ["wx", "weixin", "wechat", "蓝牙", "bluetooth", "lanya", "wifi", "safari", "jsq", "jisuanqi", "terminal", "zd", "zhongduan", "显示器", "xsq", "lock screen", "date", "mouse"] {
                 queries[query] = WindowSearch.filtered(results.map(\.descriptor), settings: self.settings.value, profile: self.settings.value.shortcuts[0],
                                                        frontPID: nil, displayID: nil, query: query)
                     .prefix(5).map { "\($0.title) (\($0.launcher?.label ?? "窗口"))" }
             }
             report["queries"] = queries
+            report["safari"] = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari")?.path ?? "not found"
+            report["languages"] = Array(Locale.preferredLanguages.prefix(3))
             let extensions = "/System/Library/ExtensionKit/Extensions"
             let battery = ((try? FileManager.default.contentsOfDirectory(atPath: extensions)) ?? [])
                 .compactMap { Bundle(path: "\(extensions)/\($0)") }.first { $0.bundleIdentifier == "com.apple.Battery-Settings.extension" }
