@@ -393,12 +393,14 @@ struct AdvancedSettings: Codable, Equatable {
         searchTypos = try c.decodeIfPresent(Bool.self, forKey: .searchTypos) ?? true
         searchLearning = try c.decodeIfPresent(Bool.self, forKey: .searchLearning) ?? true
         searchSkips = try c.decodeIfPresent(Bool.self, forKey: .searchSkips) ?? true
-        shuangpin = try c.decodeIfPresent(ShuangpinScheme.self, forKey: .shuangpin) ?? .off
+        // A scheme or an engine this version does not know, from a later one, falls back alone: thrown, it would
+        // take every other setting with it.
+        shuangpin = (try? c.decodeIfPresent(ShuangpinScheme.self, forKey: .shuangpin)) ?? .off
         searchCommands = try c.decodeIfPresent(Bool.self, forKey: .searchCommands) ?? true
         searchFiles = try c.decodeIfPresent(Bool.self, forKey: .searchFiles) ?? true
         searchCalculator = try c.decodeIfPresent(Bool.self, forKey: .searchCalculator) ?? true
         searchWeb = try c.decodeIfPresent(Bool.self, forKey: .searchWeb) ?? true
-        webEngine = try c.decodeIfPresent(WebSearchEngine.self, forKey: .webEngine) ?? .baidu
+        webEngine = (try? c.decodeIfPresent(WebSearchEngine.self, forKey: .webEngine)) ?? .baidu
         showSearchHint = try c.decodeIfPresent(Bool.self, forKey: .showSearchHint) ?? true
         shiftSelectsPrevious = try c.decodeIfPresent(Bool.self, forKey: .shiftSelectsPrevious) ?? true
         voiceOverKeepsOpen = try c.decodeIfPresent(Bool.self, forKey: .voiceOverKeepsOpen) ?? true

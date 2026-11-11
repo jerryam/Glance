@@ -526,6 +526,10 @@ struct CoreTests {
         var chosen = standard
         chosen.searchWeb = false; chosen.searchFiles = false; chosen.webEngine = .google
         check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(chosen)) == chosen, "开始菜单的设置保存后不变")
+        var later = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(chosen)) as! [String: Any]
+        later["webEngine"] = "以后才有的搜索引擎"; later["shuangpin"] = "以后才有的双拼"
+        let tolerant = try? JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: later))
+        check(tolerant?.webEngine == .baidu && tolerant?.shuangpin == .off && tolerant?.searchWeb == false && tolerant?.searchFiles == false, "不认识的搜索引擎或双拼方案回到默认值，其他设置保留")
         for word in ["计算器", "锁屏", "网页搜索", "聚焦", "必应"] { check(SettingSearchIndex.results(word).first?.section == 1, "设置搜索可以找到新选项：\(word)") }
     }
     static func verifyCrashRestart() {
