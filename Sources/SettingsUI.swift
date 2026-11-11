@@ -161,6 +161,7 @@ final class SettingsModel: ObservableObject {
     var errorsHandler: () -> [String] = { [] }
     var beforeFirstApply: () -> Void = {}
     var clearHabitsHandler: () -> Void = {}
+    var copyDiagnosticsHandler: () -> Bool = { false }
     @Published var layouts: [LayoutSnapshot] = []
     var saveLayoutHandler: () -> Void = {}
     var restoreLayoutHandler: (UUID) -> Void = { _ in }
@@ -719,6 +720,16 @@ struct SettingsView: View {
             SettingsGroup("命令行") {
                 SettingsToggle("允许命令行列出和切换窗口", isOn: $model.draft.advanced.commandLineEnabled)
                 SettingsNote("开启后，本机上的任何程序都能通过 Glance --list 读到所有窗口标题并切换窗口，而不需要自己申请权限。不用命令行时建议保持关闭。")
+            }
+            SettingsGroup("诊断") {
+                HStack(spacing: 8) {
+                    Button("复制诊断信息") {
+                        if model.copyDiagnosticsHandler() { model.note("已复制诊断信息，可以直接粘贴。") }
+                        else { model.note("没能复制诊断信息。", error: true) }
+                    }
+                    Spacer(minLength: 8)
+                }
+                SettingsNote("遇到问题时，把它粘贴给开发者。里面是版本、权限状态、各项功能的开关，以及这次运行中的次数和耗时，没有窗口标题、应用名称和你输入过的内容。不需要打开上面的命令行开关。")
             }
             SettingsGroup("备份与迁移") {
                 HStack(spacing: 8) {

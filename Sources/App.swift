@@ -734,6 +734,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
     }
+    /// 设置 › 通用 › 复制诊断信息. The numbers and states above, with what tells one Mac's report from another's and
+    /// which features are on. Nothing in it names a window or an app, or holds anything that was typed.
+    func copyDiagnostics() -> Bool {
+        var report = diagnostics()
+        let advanced = settings.value.advanced, dock = settings.value.dockPreview
+        let features: [String: Any] = [
+            "style": settings.value.style.rawValue, "profiles": settings.value.shortcuts.count,
+            "searchApps": advanced.searchApps, "searchSettingsPages": advanced.searchSettingsPages, "searchCommands": advanced.searchCommands,
+            "searchFiles": advanced.searchFiles, "searchCalculator": advanced.searchCalculator, "searchWeb": advanced.searchWeb,
+            "searchLearning": advanced.searchLearning, "searchSkips": advanced.searchSkips, "searchTypos": advanced.searchTypos,
+            "shuangpin": advanced.shuangpin.rawValue, "restartAfterCrash": advanced.restartAfterCrash, "commandLine": advanced.commandLineEnabled,
+            "dockPreview": dock.enabled, "dockLiveThumbnails": dock.liveThumbnails, "dockPeekWindow": dock.peekWindow,
+            "menuBar": settings.value.menuBar.enabled, "windowShortcuts": settings.value.windowShortcuts.enabled,
+        ]
+        report["features"] = features
+        report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        report["system"] = ProcessInfo.processInfo.operatingSystemVersionString
+        report["screens"] = NSScreen.screens.map { "\(Int($0.frame.width))x\(Int($0.frame.height))@\(Int($0.backingScaleFactor))x" }
+        report["runningSeconds"] = NSRunningApplication.current.launchDate.map { Int(Date().timeIntervalSince($0)) } ?? -1
+        guard JSONSerialization.isValidJSONObject(report),
+              let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return false }
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.setString(text, forType: .string)
+    }
     func preferredScreen(frontPID: Int32?) -> NSScreen? {
         let screens = NSScreen.screens
         if settings.value.advanced.panelScreen == .mouse {
@@ -1149,6 +1174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.applyHandler = { [weak self] in self?.settings.save($0) }
             model.errorsHandler = { [weak self] in self?.shortcutErrors ?? [] }
             model.clearHabitsHandler = { [weak self] in self?.clearSearchHabits() }
+            model.copyDiagnosticsHandler = { [weak self] in self?.copyDiagnostics() ?? false }
             model.layouts = layouts
             model.saveLayoutHandler = { [weak self] in self?.saveCurrentLayout() }
             model.restoreLayoutHandler = { [weak self] id in self?.restoreLayout(id) }

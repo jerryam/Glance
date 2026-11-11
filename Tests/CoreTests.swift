@@ -533,6 +533,7 @@ struct CoreTests {
         let tolerant = try? JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: later))
         check(tolerant?.webEngine == .baidu && tolerant?.shuangpin == .off && tolerant?.searchWeb == false && tolerant?.searchFiles == false, "不认识的搜索引擎或双拼方案回到默认值，其他设置保留")
         for word in ["计算器", "锁屏", "网页搜索", "聚焦", "必应"] { check(SettingSearchIndex.results(word).first?.section == 1, "设置搜索可以找到新选项：\(word)") }
+        check(SettingSearchIndex.results("诊断").first?.title == "复制诊断信息" && SettingSearchIndex.results("diagnostics").contains { $0.title == "复制诊断信息" }, "设置搜索可以找到复制诊断信息")
     }
     static func verifyCrashRestart() {
         let p = CrashRestartPolicy.self

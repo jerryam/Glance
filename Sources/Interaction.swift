@@ -1036,6 +1036,7 @@ enum SettingSearchIndex {
         .init(6, "显示菜单栏图标"), .init(6, "菜单栏图标", "彩色 实心 线条"), .init(6, "登录时自动启动", "开机 login startup"),
         .init(6, "意外退出后自动重新打开", "崩溃 闪退 重启 crash restart relaunch"),
         .init(6, "允许命令行列出和切换窗口", "命令行 终端 CLI terminal list 安全"),
+        .init(6, "复制诊断信息", "诊断 排查 问题 反馈 报告 diagnostics debug report"),
         .init(6, "备份与迁移", "导出 导入 备份 恢复 迁移 默认 export import backup reset"),
         .init(7, "管理菜单栏图标", "隐藏 收起 图标 状态栏 Ice Bartender menu bar 刘海"),
         .init(7, "图标分组", "显示 隐藏 始终隐藏 拖动 分组 应用"),
