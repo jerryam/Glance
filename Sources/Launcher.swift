@@ -16,12 +16,14 @@ struct LaunchEntry: Equatable {
     var id: String { "launch:\(kind == .app ? "app" : (kind == .setting ? "setting" : "command")):\(bundleID)" }
 }
 
-/// The user's files whose names hold what was typed, from Spotlight. It looks once for each pause in the typing and
-/// then stops, so nothing runs while the panel is closed.
+/// The user's files whose names hold what was typed, from Spotlight, in the folders the home folder shows. It looks
+/// once for each pause in the typing and then stops, so nothing runs while the panel is closed.
 final class FileSearch {
     private var query: NSMetadataQuery?
-    private var observer: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
     private var pending: DispatchWorkItem?
+    /// The matching files that lie loose in the home folder, found when a search starts.
+    private var loose: [String] = []
     private(set) var results: [WindowHandle] = []
     var onUpdate: (() -> Void)?
 
@@ -44,37 +46,58 @@ final class FileSearch {
     }
     private func stop() {
         query?.stop(); query = nil
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
     }
     private func start(_ tokens: [String]) {
         stop()
+        // Only the folders the home folder shows. Library alone holds most of the names on a Mac, nearly all of them
+        // files that apps keep for themselves: searched, they crowd out everything else.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let entries = (try? FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
+        var folders: [String] = [], files: [String] = []
+        for entry in entries {
+            let isFolder = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            if isFolder { folders.append(entry.lastPathComponent) } else { files.append(entry.lastPathComponent) }
+        }
+        loose = FileSearchPolicy.loose(files, tokens: tokens).map { home.appendingPathComponent($0).path }
+        let scopes: [Any] = FileSearchPolicy.folders(folders).map { home.appendingPathComponent($0, isDirectory: true) }
         let search = NSMetadataQuery()
-        search.searchScopes = [NSMetadataQueryUserHomeScope]
+        search.searchScopes = scopes.isEmpty ? [NSMetadataQueryUserHomeScope as Any] : scopes
         search.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: tokens.map { NSPredicate(format: "%K LIKE[cd] %@", NSMetadataItemFSNameKey, "*\($0)*") })
         search.sortDescriptors = [NSSortDescriptor(key: NSMetadataItemFSContentChangeDateKey, ascending: false)]
-        observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: search, queue: .main) { [weak self] _ in self?.finish() }
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: search, queue: .main) { [weak self, weak search] _ in
+                if let search { self?.finish(search) }
+            },
+            // A word in a great many names: the first of them are enough, and the rest need not be gathered.
+            center.addObserver(forName: .NSMetadataQueryGatheringProgress, object: search, queue: .main) { [weak self, weak search] _ in
+                if let search, search.resultCount >= FileSearchPolicy.looked { self?.finish(search) }
+            },
+        ]
         query = search
         if !search.start() { stop() }
     }
-    private func finish() {
-        guard let query else { return }
-        query.disableUpdates()
-        var paths: [String] = [], types: [String: String] = [:]
-        for index in 0..<min(query.resultCount, FileSearchPolicy.looked) {
-            guard let item = query.result(at: index) as? NSMetadataItem, let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { continue }
-            paths.append(path)
+    private func finish(_ search: NSMetadataQuery) {
+        guard search === query else { return }
+        search.disableUpdates()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var types: [String: String] = [:]
+        let found = FileSearchPolicy.pick(from: search.resultCount, home: home, first: loose) { index in
+            guard let item = search.result(at: index) as? NSMetadataItem, let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { return nil }
             types[path] = item.value(forAttribute: NSMetadataItemContentTypeKey) as? String
+            return path
         }
         stop()
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        results = FileSearchPolicy.kept(paths, home: home).map { path in
+        results = found.map { path in
             var descriptor = WindowDescriptor(id: "file:\(path)", windowID: nil, pid: 0, appName: FileSearchPolicy.place(of: path, home: home), bundleID: "",
                                               title: (path as NSString).lastPathComponent, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
             descriptor.launcher = .file
             descriptor.launchTarget = path
             // By the kind of file, so that listing a result never touches anything inside Documents or Desktop.
-            let icon = NSWorkspace.shared.icon(for: types[path].flatMap { UTType($0) } ?? .data)
+            let kind = types[path].flatMap { UTType($0) } ?? UTType(filenameExtension: (path as NSString).pathExtension) ?? .data
+            let icon = NSWorkspace.shared.icon(for: kind)
             return WindowHandle(descriptor: descriptor, ax: nil, icon: icon)
         }
         onUpdate?()

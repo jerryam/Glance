@@ -453,7 +453,8 @@ struct CoreTests {
         // Files.
         let home = "/Users/me"
         check(FileSearchPolicy.tokens("报告 2026") == ["报告", "2026"], "按空格分开查找")
-        for text in ["a", "", "  ", "* ?"] { check(FileSearchPolicy.tokens(text).isEmpty, "至少两个字才查文件：\(text)") }
+        for text in ["a", "", "  ", "* ?", "ab", "a b", "12"] { check(FileSearchPolicy.tokens(text).isEmpty, "字数不够时不查文件：\(text)") }
+        check(FileSearchPolicy.tokens("abc") == ["abc"] && FileSearchPolicy.tokens("报告") == ["报告"] && FileSearchPolicy.tokens("a报") == ["a报"], "英文和数字三个字符起查，有汉字时两个字起查")
         check(FileSearchPolicy.tokens("a*b?c") == ["abc"], "通配符不进入查询")
         check(FileSearchPolicy.tokens("\"x'y\\z") == ["xyz"], "引号和反斜杠不进入查询")
         check(FileSearchPolicy.tokens("a b c d e f g").count == 5, "关键词数量有上限")
@@ -461,7 +462,23 @@ struct CoreTests {
         for path in ["/Users/me/Library/Caches/a.txt", "/Users/me/.ssh/config", "/Users/me/x/.git/a", "/Users/me/Applications/A.app", "/Users/me/A.app/Contents/x.txt", "/Users/other/a.txt", "/Users/melissa/a.txt", "/tmp/a.txt"] {
             check(!FileSearchPolicy.keeps(path: path, home: home), "不列这个文件：\(path)")
         }
-        check(FileSearchPolicy.kept((0..<20).map { "/Users/me/\($0).txt" }, home: home).count == FileSearchPolicy.limit, "文件数量有上限")
+        let buried = (0..<300).map { "/Users/me/Library/Application Support/x/config\($0).plist" } + ["/Users/me/Documents/config.yaml", "/Users/me/x/.git/config", "/Users/me/Desktop/config.txt"]
+        var read = 0
+        let dug = FileSearchPolicy.pick(from: buried.count, home: home) { index in read += 1; return buried[index] }
+        check(dug == ["/Users/me/Documents/config.yaml", "/Users/me/Desktop/config.txt"], "前面全是 Library 里的文件时，后面的文稿仍然列得出来")
+        let plenty = (0..<50).map { "/Users/me/Documents/\($0).txt" }
+        read = 0
+        let enough = FileSearchPolicy.pick(from: plenty.count, home: home) { index in read += 1; return plenty[index] }
+        check(enough.count == FileSearchPolicy.limit && read == FileSearchPolicy.limit, "文件数量有上限，够数以后不再往下读")
+        read = 0
+        let nothing = FileSearchPolicy.pick(from: 100_000, home: home) { _ in read += 1; return nil }
+        check(nothing.isEmpty && read == FileSearchPolicy.looked, "匹配再多，也只看前面有限的几条")
+        let spotlight = ["/Users/me/a.txt", "/Users/me/Documents/b.txt", "/Users/me/Documents/c.txt"]
+        let merged = FileSearchPolicy.pick(from: spotlight.count, home: home, first: ["/Users/me/a.txt"]) { index in spotlight[index] }
+        check(merged == spotlight, "主目录里直接放着的文件排在前面，不重复列出")
+        check(FileSearchPolicy.folders(["Documents", "Library", ".Trash", "Desktop", "Tool.app", "Projects"]) == ["Desktop", "Documents", "Projects"], "只查主目录下看得见的文件夹，不查 Library")
+        check(FileSearchPolicy.loose(["报告 2026.pdf", "Report.TXT", ".report", "notes.md"], tokens: ["report"]) == ["Report.TXT"], "主目录里直接放着的文件按名称查，不分大小写，不列隐藏文件")
+        check(FileSearchPolicy.loose(["报告 2026.pdf", "报告.txt"], tokens: ["报告", "2026"]) == ["报告 2026.pdf"], "每个词都要在名称里")
         check(FileSearchPolicy.place(of: "/Users/me/Documents/a.txt", home: home) == "~/Documents", "子文件夹里的文件")
         check(FileSearchPolicy.place(of: "/Users/me/a.txt", home: home) == "~", "主目录里的文件")
         check(FileSearchPolicy.place(of: "/tmp/a.txt", home: home) == "/tmp", "其他位置的文件")

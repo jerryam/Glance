@@ -593,13 +593,17 @@ enum SystemCommand: String, CaseIterable {
 /// Which files a search lists. Names come from Spotlight and stay in memory: nothing about them is written down.
 enum FileSearchPolicy {
     static let limit = 8
-    /// How many Spotlight answers to look through for that many worth listing.
-    static let looked = 60
+    /// How many Spotlight answers to look through for that many worth listing. Once it has this many, the search
+    /// stops gathering more.
+    static let looked = 400
     static let shortest = 2
+    /// Two letters are in tens of thousands of names, while two Chinese characters are already a word.
+    static let shortestLatin = 3
     /// The words to look for, without the characters Spotlight would read as wildcards.
     static func tokens(_ query: String) -> [String] {
         let words = query.split(whereSeparator: { $0.isWhitespace }).map { word in String(word.filter { !"*?\\\"'".contains($0) }) }.filter { !$0.isEmpty }
-        return words.joined().count >= shortest ? Array(words.prefix(5)) : []
+        let typed = words.joined()
+        return typed.count >= (typed.allSatisfy(\.isASCII) ? shortestLatin : shortest) ? Array(words.prefix(5)) : []
     }
     /// The user's own files: not hidden ones, not what apps keep in Library, not apps (which the search lists anyway).
     static func keeps(path: String, home: String) -> Bool {
@@ -607,8 +611,30 @@ enum FileSearchPolicy {
         let inside = path.dropFirst(home.count + 1).split(separator: "/")
         return !inside.contains { $0.hasPrefix(".") || $0.hasSuffix(".app") }
     }
-    static func kept(_ paths: [String], home: String) -> [String] {
-        Array(paths.filter { keeps(path: $0, home: home) }.prefix(limit))
+    /// Goes through Spotlight's answers in its order until there are enough worth listing, and reads no further.
+    /// `first` are listed ahead of them: the files found without Spotlight.
+    static func pick(from count: Int, home: String, first: [String] = [], path: (Int) -> String?) -> [String] {
+        var found = Array(first.prefix(limit))
+        var index = 0
+        while found.count < limit, index < min(count, looked) {
+            if let candidate = path(index), keeps(path: candidate, home: home), !found.contains(candidate) { found.append(candidate) }
+            index += 1
+        }
+        return found
+    }
+    /// The folders of the home folder to search: the ones it shows. Not Library, which apps fill with files of their own.
+    static func folders(_ names: [String]) -> [String] {
+        names.filter { !$0.hasPrefix(".") && $0 != "Library" && !$0.hasSuffix(".app") }.sorted()
+    }
+    /// Files lying loose in the home folder, which is none of those folders: the ones whose names hold every word.
+    static func loose(_ names: [String], tokens: [String]) -> [String] {
+        let words = tokens.map(WindowSearch.normalized)
+        guard !words.isEmpty else { return [] }
+        return names.filter { name in
+            guard !name.hasPrefix(".") else { return false }
+            let folded = WindowSearch.normalized(name)
+            return words.allSatisfy { folded.contains($0) }
+        }.sorted()
     }
     /// Where it is, for the line under its name.
     static func place(of path: String, home: String) -> String {

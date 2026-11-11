@@ -322,10 +322,9 @@ extension AppDelegate {
 
     // MARK: The rest of the start menu
 
-    /// A file search for each pause in the typing, which a sum does not need.
+    /// A file search for each pause in the typing. A sum does not stop it: "11-9" is in the names of files too.
     func queryChanged(_ query: String) {
-        let advanced = settings.value.advanced
-        guard showing, !state.isDemo, advanced.searchFiles, !(advanced.searchCalculator && Calculator.evaluate(query) != nil) else { fileSearch.cancel(); return }
+        guard showing, !state.isDemo, settings.value.advanced.searchFiles else { fileSearch.cancel(); return }
         fileSearch.search(query)
     }
     /// Rows made from what was typed. Nothing here touches the network: a web row is only an address until it is chosen.
