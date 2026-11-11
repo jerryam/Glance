@@ -117,8 +117,8 @@ final class SwitcherState: ObservableObject {
         items = descriptors.compactMap { descriptor in handles[descriptor.id].map { $0.with(descriptor) } }
         if reset { selectedIndex = 0 }
         else if let previousID, let index = items.firstIndex(where: { $0.id == previousID }) {
-            // A web search selected only for being the first row gives way to files found after it.
-            selectedIndex = selectedIndex == 0 && items[index].descriptor.launcher == .web ? 0 : index
+            // Results that arrive later, such as files, never take the selection: Return does what it showed a moment ago.
+            selectedIndex = index
         }
         else { selectedIndex = min(selectedIndex, max(0, items.count - 1)) }
         if previousID != selected?.id { onSelectionChanged?() }
