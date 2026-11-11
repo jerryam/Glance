@@ -224,6 +224,8 @@ struct UserSettings: Codable, Equatable {
         case style, theme, adaptiveThumbnails, thumbnailWidth, showMinimized, showHidden, livePreviews
         case mouseHoverEnabled, showWindowlessApps, exclusions, shortcuts, advanced, menuBar, dockPreview, windowShortcuts
     }
+    /// The revision as it was saved, read on its own: `advanced` raises it to the current one as it is read.
+    private struct SavedRevision: Decodable { let preferencesRevision: Int? }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         style = (try? values.decodeIfPresent(SwitcherStyle.self, forKey: .style)) ?? .thumbnails
@@ -240,6 +242,10 @@ struct UserSettings: Codable, Equatable {
         advanced = try values.decodeIfPresent(AdvancedSettings.self, forKey: .advanced) ?? AdvancedSettings()
         menuBar = (try? values.decodeIfPresent(MenuBarSettings.self, forKey: .menuBar)) ?? MenuBarSettings()
         dockPreview = (try? values.decodeIfPresent(DockPreviewSettings.self, forKey: .dockPreview)) ?? DockPreviewSettings()
+        // Like file and web search in `advanced`: on from the start in the 2.5.0 test build, off from revision 3, and
+        // what was saved before that is turned off with them.
+        let revision = (try? values.decodeIfPresent(SavedRevision.self, forKey: .advanced))?.preferencesRevision ?? 0
+        if revision < 3 { dockPreview.liveThumbnails = false; dockPreview.peekWindow = false }
         windowShortcuts = (try? values.decodeIfPresent(WindowShortcutSettings.self, forKey: .windowShortcuts)) ?? WindowShortcutSettings()
     }
 

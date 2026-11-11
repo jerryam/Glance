@@ -172,10 +172,11 @@ struct DockPreviewSettings: Codable, Equatable {
     /// Milliseconds the pointer rests on an icon before the preview opens.
     var delay = 300
     var includeMinimized = true
-    /// New pictures while the panel is open.
-    var liveThumbnails = true
+    /// New pictures while the panel is open. Off until asked for, like the next one: 2.5.0 added both without a run
+    /// on a real Mac.
+    var liveThumbnails = false
     /// Resting on a card shows that window's picture at the window's own place.
-    var peekWindow = true
+    var peekWindow = false
     static let delayRange = 0...1000
     init() {}
     private enum CodingKeys: String, CodingKey { case enabled, delay, includeMinimized, liveThumbnails, peekWindow }
@@ -184,8 +185,8 @@ struct DockPreviewSettings: Codable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         delay = try c.decodeIfPresent(Int.self, forKey: .delay) ?? 300
         includeMinimized = try c.decodeIfPresent(Bool.self, forKey: .includeMinimized) ?? true
-        liveThumbnails = try c.decodeIfPresent(Bool.self, forKey: .liveThumbnails) ?? true
-        peekWindow = try c.decodeIfPresent(Bool.self, forKey: .peekWindow) ?? true
+        liveThumbnails = try c.decodeIfPresent(Bool.self, forKey: .liveThumbnails) ?? false
+        peekWindow = try c.decodeIfPresent(Bool.self, forKey: .peekWindow) ?? false
     }
 }
 
@@ -336,7 +337,7 @@ struct TolerantElement<Value: Decodable>: Decodable {
 }
 
 struct AdvancedSettings: Codable, Equatable {
-    var preferencesRevision = 2
+    var preferencesRevision = 3
     var inputMode: PanelInputMode = .search
     var searchRanking = true
     var searchTypos = true
@@ -344,9 +345,10 @@ struct AdvancedSettings: Codable, Equatable {
     var searchSkips = true
     var shuangpin = ShuangpinScheme.off
     var searchCommands = true
-    var searchFiles = true
+    /// Off until asked for, like `searchWeb`: 2.5.0 added both without a run on a real Mac.
+    var searchFiles = false
     var searchCalculator = true
-    var searchWeb = true
+    var searchWeb = false
     var webEngine = WebSearchEngine.baidu
     var showSearchHint = true
     var shiftSelectsPrevious = true
@@ -396,7 +398,7 @@ struct AdvancedSettings: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let revision = try c.decodeIfPresent(Int.self, forKey: .preferencesRevision) ?? 0
-        preferencesRevision = max(2, revision)
+        preferencesRevision = max(3, revision)
         // Read with `try?`, here and below: a choice this version does not know, saved by a later one, falls back alone.
         inputMode = (try? c.decodeIfPresent(PanelInputMode.self, forKey: .inputMode)) ?? .search
         searchRanking = try c.decodeIfPresent(Bool.self, forKey: .searchRanking) ?? true
@@ -407,10 +409,13 @@ struct AdvancedSettings: Codable, Equatable {
         // take every other setting with it.
         shuangpin = (try? c.decodeIfPresent(ShuangpinScheme.self, forKey: .shuangpin)) ?? .off
         searchCommands = try c.decodeIfPresent(Bool.self, forKey: .searchCommands) ?? true
-        searchFiles = try c.decodeIfPresent(Bool.self, forKey: .searchFiles) ?? true
+        searchFiles = try c.decodeIfPresent(Bool.self, forKey: .searchFiles) ?? false
         searchCalculator = try c.decodeIfPresent(Bool.self, forKey: .searchCalculator) ?? true
-        searchWeb = try c.decodeIfPresent(Bool.self, forKey: .searchWeb) ?? true
+        searchWeb = try c.decodeIfPresent(Bool.self, forKey: .searchWeb) ?? false
         webEngine = (try? c.decodeIfPresent(WebSearchEngine.self, forKey: .webEngine)) ?? .baidu
+        // The 2.5.0 test build, at revision 2, had both on from the start and saved them so: a saved "on" from then
+        // is not a choice. From revision 3 they start off, and what was saved before is turned off with them.
+        if revision < 3 { searchFiles = false; searchWeb = false }
         showSearchHint = try c.decodeIfPresent(Bool.self, forKey: .showSearchHint) ?? true
         shiftSelectsPrevious = try c.decodeIfPresent(Bool.self, forKey: .shiftSelectsPrevious) ?? true
         voiceOverKeepsOpen = try c.decodeIfPresent(Bool.self, forKey: .voiceOverKeepsOpen) ?? true

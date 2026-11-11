@@ -534,18 +534,23 @@ struct CoreTests {
 
         // Settings.
         let standard = AdvancedSettings()
-        check(standard.searchCommands && standard.searchFiles && standard.searchCalculator && standard.searchWeb, "开始菜单的功能默认开启")
+        check(standard.searchCommands && standard.searchCalculator && !standard.searchFiles && !standard.searchWeb, "系统命令和算式默认开启，文件搜索和网页搜索默认关闭")
         check(standard.webEngine == .baidu, "默认的搜索引擎")
         var stored = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(standard)) as! [String: Any]
         for key in ["searchCommands", "searchFiles", "searchCalculator", "searchWeb", "webEngine"] { stored.removeValue(forKey: key) }
         check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: stored)) == standard, "旧设置没有这几项时采用默认值")
         var chosen = standard
-        chosen.searchWeb = false; chosen.searchFiles = false; chosen.webEngine = .google
+        chosen.searchWeb = true; chosen.searchFiles = true; chosen.webEngine = .google
         check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(chosen)) == chosen, "开始菜单的设置保存后不变")
         var later = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(chosen)) as! [String: Any]
         later["webEngine"] = "以后才有的搜索引擎"; later["shuangpin"] = "以后才有的双拼"
         let tolerant = try? JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: later))
-        check(tolerant?.webEngine == .baidu && tolerant?.shuangpin == .off && tolerant?.searchWeb == false && tolerant?.searchFiles == false, "不认识的搜索引擎或双拼方案回到默认值，其他设置保留")
+        check(tolerant?.webEngine == .baidu && tolerant?.shuangpin == .off && tolerant?.searchWeb == true && tolerant?.searchFiles == true, "不认识的搜索引擎或双拼方案回到默认值，其他设置保留")
+        var testBuild = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(chosen)) as! [String: Any]
+        testBuild["preferencesRevision"] = 2
+        let moved = try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: testBuild))
+        check(!moved.searchFiles && !moved.searchWeb && moved.preferencesRevision == 3, "2.5.0 测试版存下的文件搜索和网页搜索改为关闭")
+        check(moved.webEngine == .google && moved.searchCommands && moved.searchCalculator, "其他开始菜单的设置保留")
         for word in ["计算器", "锁屏", "网页搜索", "聚焦", "必应"] { check(SettingSearchIndex.results(word).first?.section == 1, "设置搜索可以找到新选项：\(word)") }
         check(SettingSearchIndex.results("诊断").first?.title == "复制诊断信息" && SettingSearchIndex.results("diagnostics").contains { $0.title == "复制诊断信息" }, "设置搜索可以找到复制诊断信息")
     }
@@ -693,12 +698,21 @@ struct CoreTests {
             return d
         }
         // Settings.
-        check(DockPreviewSettings().liveThumbnails && DockPreviewSettings().peekWindow, "实时更新和窗口位置预览默认开启")
+        check(!DockPreviewSettings().liveThumbnails && !DockPreviewSettings().peekWindow, "实时更新和窗口位置预览默认关闭")
         let old = try! JSONDecoder().decode(DockPreviewSettings.self, from: Data(#"{"enabled":false,"delay":150,"includeMinimized":false}"#.utf8))
-        check(!old.enabled && old.delay == 150 && !old.includeMinimized && old.liveThumbnails && old.peekWindow, "旧设置没有新字段时保留原值，新开关采用默认值")
-        var off = DockPreviewSettings(); off.liveThumbnails = false; off.peekWindow = false
-        let back = try! JSONDecoder().decode(DockPreviewSettings.self, from: JSONEncoder().encode(off))
-        check(back == off, "关掉的开关保存后仍然是关的")
+        check(!old.enabled && old.delay == 150 && !old.includeMinimized && !old.liveThumbnails && !old.peekWindow, "旧设置没有新字段时保留原值，新开关采用默认值")
+        var on = DockPreviewSettings(); on.liveThumbnails = true; on.peekWindow = true; on.delay = 500
+        let back = try! JSONDecoder().decode(DockPreviewSettings.self, from: JSONEncoder().encode(on))
+        check(back == on, "打开的开关保存后仍然是开的")
+        var whole = UserSettings.defaults
+        whole.dockPreview = on
+        check(try! JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(whole)).dockPreview == on, "整份设置保存后，打开的开关不变")
+        var earlier = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(whole)) as! [String: Any]
+        var earlierAdvanced = earlier["advanced"] as! [String: Any]
+        earlierAdvanced["preferencesRevision"] = 2
+        earlier["advanced"] = earlierAdvanced
+        let turnedOff = try! JSONDecoder().decode(UserSettings.self, from: JSONSerialization.data(withJSONObject: earlier)).dockPreview
+        check(!turnedOff.liveThumbnails && !turnedOff.peekWindow && turnedOff.delay == 500, "2.5.0 测试版存下的实时更新和原位显示改为关闭，其他设置保留")
 
         // Live pictures.
         let p = DockPreviewPolicy.self
