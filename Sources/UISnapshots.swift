@@ -3,12 +3,15 @@ import ScreenCaptureKit
 
 /// A development check for the interface: `Glance --ui-snapshots <folder>` shows each settings page and
 /// the demo panel in light and dark appearance, in front of a plain backdrop, and saves pictures of them.
+/// A settings page longer than its window gets a picture of each screenful.
 /// The capture includes only 一瞥's own windows; nothing else on the screen is recorded. Without Screen Recording,
 /// as on a build machine, each window draws itself into its picture instead: `scripts/ui-snapshots-check.sh`.
 extension AppDelegate {
     private struct SnapshotStep {
         var name: String?
         var prepare: () -> NSWindow?
+        /// Called after each picture: moves on to a part of the same window not yet pictured, and says whether there was one.
+        var more: (() -> Bool)? = nil
     }
 
     func runUISnapshots() {
@@ -27,7 +30,7 @@ extension AppDelegate {
                 return nil
             })
             for section in SettingsSection.allCases {
-                steps.append(SnapshotStep(name: "settings-\(section.rawValue)-\(suffix)") { [unowned self] in
+                steps.append(SnapshotStep(name: "settings-\(section.rawValue)-\(suffix)", prepare: { [unowned self] in
                     if self.settingsWindow?.isVisible != true { self.openSettings() }
                     // Keep the window active, so the pictures show its active state.
                     self.settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -35,7 +38,9 @@ extension AppDelegate {
                     self.settingsModel?.search = ""; self.settingsModel?.searchTarget = ""
                     self.settingsModel?.selectedTab = section.rawValue
                     return self.settingsWindow
-                })
+                }, more: { [unowned self] in
+                    self.settingsWindow.map { Self.scrollOn($0) } ?? false
+                }))
             }
             for style in SwitcherStyle.allCases {
                 steps.append(SnapshotStep(name: "panel-\(style.rawValue)-\(suffix)") { [unowned self] in
@@ -63,7 +68,8 @@ extension AppDelegate {
         }
         let canCapture = CGPreflightScreenCaptureAccess()
         var written: [String] = [], missing: [String] = [], drawn = 0
-        func run(_ position: Int) {
+        var current: NSWindow?
+        func run(_ position: Int, part: Int) {
             guard position < steps.count else {
                 dismiss(); settingsWindow?.orderOut(nil); backdrop.orderOut(nil)
                 state.query = ""; state.searchVisible = false
@@ -78,9 +84,10 @@ extension AppDelegate {
                 return
             }
             let step = steps[position]
-            let target = step.prepare()
-            guard let name = step.name else { run(position + 1); return }
-            guard let target else { missing.append(name + ".png"); run(position + 1); return }
+            if part == 1 { current = step.prepare() }
+            guard let base = step.name else { run(position + 1, part: 1); return }
+            let name = part == 1 ? base : "\(base)-\(part)"
+            guard let target = current else { missing.append(name + ".png"); run(position + 1, part: 1); return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                 guard let self else { return }
                 let area = target.frame.insetBy(dx: -40, dy: -40)
@@ -93,13 +100,41 @@ extension AppDelegate {
                         if captured { written.append(url.lastPathComponent) }
                         else if Self.drawWindow(target, to: url) { written.append(url.lastPathComponent); drawn += 1 }
                         else { missing.append(url.lastPathComponent) }
-                        run(position + 1)
+                        if part < 8, step.more?() == true { run(position, part: part + 1) } else { run(position + 1, part: 1) }
                     }
                     if canCapture { self.captureOwnWindows([backdrop, target], area: area, to: url, completion: finish) } else { finish(false) }
                 }
             }
         }
-        run(0)
+        run(0, part: 1)
+    }
+
+    /// Moves the window's largest scrolling area on by nearly a screenful, for the next picture of a long page.
+    /// False at the end of the page or where nothing scrolls, and the area is then back at its top.
+    private static func scrollOn(_ window: NSWindow) -> Bool {
+        var largest: NSScrollView?
+        func visit(_ view: NSView) {
+            if let scroll = view as? NSScrollView, scroll.frame.width * scroll.frame.height > (largest.map { $0.frame.width * $0.frame.height } ?? 0) { largest = scroll }
+            for inner in view.subviews { visit(inner) }
+        }
+        if let root = window.contentView { visit(root) }
+        guard let scroll = largest, let document = scroll.documentView else { return false }
+        let clip = scroll.contentView, visible = scroll.documentVisibleRect, insets = scroll.contentInsets
+        let flipped = document.isFlipped
+        // The visible part's origin at the two ends of the page. A flipped page counts down from its top.
+        let top = flipped ? document.frame.minY - insets.top : document.frame.maxY + insets.top - visible.height
+        let bottom = flipped ? document.frame.maxY + insets.bottom - visible.height : document.frame.minY - insets.bottom
+        func move(to y: CGFloat) {
+            clip.scroll(to: NSPoint(x: visible.minX, y: y))
+            scroll.reflectScrolledClipView(clip)
+        }
+        let left = flipped ? bottom - visible.minY : visible.minY - bottom
+        guard left > 1 else { move(to: top); return false }
+        // A little less than what shows, so that a row cut by one picture is whole in the next.
+        let step = min(max(visible.height - insets.top - insets.bottom - 48, 48), left)
+        move(to: flipped ? visible.minY + step : visible.minY - step)
+        guard abs(scroll.documentVisibleRect.minY - visible.minY) > 1 else { move(to: top); return false }
+        return true
     }
 
     /// The window as it draws itself, frame and contents, on the window's own background colour. It stands in for a

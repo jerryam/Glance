@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Opens every settings page and the switcher panel in the built app, in light and dark, and saves a picture of each
-# in ui-snapshots/, with a list of what the search can open on this Mac. A page that crashes the app, hangs it or
+# in ui-snapshots/, with a list of what the search can open on this Mac. The app runs in Chinese, as its users have
+# it, whatever language the Mac is set to. A page that crashes the app, hangs it or
 # cannot be drawn fails the check. It needs no permissions: without Screen Recording the app draws its own windows
 # into the pictures. It quits every copy of 一瞥 running under this user, so it is for CI or a Mac not in use.
 set -u
@@ -14,7 +15,7 @@ rm -rf "$out"
 mkdir -p "$out"
 
 # Started directly rather than with `open`, so that what it prints can be kept.
-"$binary" --ui-snapshots "$out" > "$out/app.log" 2>&1 &
+"$binary" --ui-snapshots "$out" -AppleLanguages '(zh-Hans)' > "$out/app.log" 2>&1 &
 sleep 3
 tries=180
 while (( tries-- > 0 )); do
@@ -49,7 +50,7 @@ if (( pictures == 0 )); then
 fi
 
 # What the search can open here, and how a few searches rank, with real app names and the system's real pinyin.
-"$binary" --launcher-dump "$out/launcher-dump.json" > /dev/null 2>&1 &
+"$binary" --launcher-dump "$out/launcher-dump.json" -AppleLanguages '(zh-Hans)' > /dev/null 2>&1 &
 tries=30
 while (( tries-- > 0 )); do
     [[ -f "$out/launcher-dump.json" ]] && break
