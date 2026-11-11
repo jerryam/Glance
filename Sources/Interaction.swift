@@ -293,6 +293,16 @@ enum QuickCommitPolicy {
     }
 }
 
+/// How long after a window or app event the closed panel's list is read again. Soon, but at most once a second for
+/// an app that keeps opening windows. While the front app has taken over the screen it is once in five seconds: a
+/// game should not pay for what other apps do, yet a quick switch out of a full-screen app still needs a list that
+/// is current, so the reads are not stopped altogether.
+enum IdleRefreshPolicy {
+    static func delay(sinceLast: TimeInterval, fullscreen: Bool) -> TimeInterval {
+        fullscreen ? max(1, 5 - sinceLast) : max(0.25, 1 - sinceLast)
+    }
+}
+
 /// Whether the front app has taken over the screen, as a game does. A plain window filling a display does not
 /// count: it sits below the menu bar, which can still be reached.
 enum FrontFullscreenPolicy {
@@ -1217,6 +1227,20 @@ struct ScanLedger {
         sources = sources.filter { running.contains($0.key) }
         return kept
     }
+}
+
+/// Requests that share one answer. While a key is being asked, another asker joins the wait instead of asking
+/// again, so something slow to answer is asked once however often it is wanted.
+struct SharedRequests<Key: Hashable, Callback> {
+    private var waiting: [Key: [Callback]] = [:]
+    /// True when the caller should start the work. False when it is under way already: this asker hears of it too.
+    mutating func join(_ key: Key, _ callback: Callback) -> Bool {
+        if waiting[key] != nil { waiting[key]?.append(callback); return false }
+        waiting[key] = [callback]
+        return true
+    }
+    /// Everyone who waited for this key. They wait no longer, so the next asker starts the work again.
+    mutating func finish(_ key: Key) -> [Callback] { waiting.removeValue(forKey: key) ?? [] }
 }
 
 /// A thread that only runs a run loop, for event sources whose callbacks must not wait for the main thread.

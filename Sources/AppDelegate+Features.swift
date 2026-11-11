@@ -99,15 +99,16 @@ extension AppDelegate {
     func syncPins(_ handles: [WindowHandle]) {
         guard !pins.isEmpty else { return }
         let windows = handles.map(\.descriptor), ids = Set(windows.map(\.id))
-        var liveWindowIDs = Set<UInt32>(), runningApps: [Int32: String] = [:]
-        if pins.contains(where: { !ids.contains($0.id) }) {
-            let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
-            liveWindowIDs = Set(info.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
+        // Only a pin with a process behind it, whose window this read did not find, needs to know which apps run.
+        // A pin that waits for its app to come back has none, and may wait for days: it must cost nothing per read.
+        // The window numbers are the ones this same read got from the window server.
+        var runningApps: [Int32: String] = [:]
+        if pins.contains(where: { $0.pid != 0 && !ids.contains($0.id) }) {
             for app in NSWorkspace.shared.runningApplications where !app.isTerminated {
                 runningApps[app.processIdentifier] = app.bundleIdentifier ?? ""
             }
         }
-        let resolved = PinPolicy.resolve(pins, windows: windows, runningApps: runningApps, liveWindowIDs: liveWindowIDs)
+        let resolved = PinPolicy.resolve(pins, windows: windows, runningApps: runningApps, liveWindowIDs: engine.liveWindowIDs)
         if resolved != pins { pins = resolved; savePins() }
         pinnedIDs = PinPolicy.boundIDs(pins)
         state.pinnedIDs = pinnedIDs

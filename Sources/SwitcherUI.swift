@@ -19,7 +19,11 @@ final class SwitcherState: ObservableObject {
     @Published var items: [WindowHandle] = []
     @Published var selectedIndex = 0 { didSet { if selectedIndex != oldValue { onSelectionChanged?() } } }
     @Published var hoveredID: String?
-    @Published var images: [String: NSImage] = [:]
+    /// Previews also arrive while the panel is closed, from background captures and from the Dock preview, and no
+    /// view shows them then. Only changes made while `previewsShown` is set are announced.
+    var images: [String: NSImage] = [:] { willSet { if previewsShown { objectWillChange.send() } } }
+    /// Follows the panel as it opens and closes. Opening announces once, for everything stored in between.
+    var previewsShown = true { didSet { if previewsShown && !oldValue { objectWillChange.send() } } }
     @Published var style: SwitcherStyle = .thumbnails
     /// Grid for the icon and list styles.
     @Published var layout = ThumbnailLayout(columns: 3, width: 230, height: 239)

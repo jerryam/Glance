@@ -34,6 +34,9 @@ enum DockBadges {
 final class FrontFullscreenWatch {
     private(set) var active = false
     var onChange: (() -> Void)?
+    /// Whether an app's focused window is full screen, when someone else heard it from the app a moment ago. With nil,
+    /// or with nothing set here, the watch asks the app itself, so it never depends on anyone else having asked.
+    var recentWindowFullscreen: ((Int32) -> Bool?)?
     private static let interval: TimeInterval = 2
     private let queue = DispatchQueue(label: "Glance.frontFullscreen", qos: .utility)
     private var observers: [NSObjectProtocol] = []
@@ -45,7 +48,9 @@ final class FrontFullscreenWatch {
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didWakeNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.look()
+                // The window engine asks the front app about its focused window on the same event. A moment later its
+                // answer is there to use, and the app is asked once instead of twice.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.look() }
                 // A game usually takes over the screen a moment after it comes to the front.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.look() }
             })
@@ -67,8 +72,9 @@ final class FrontFullscreenWatch {
         // Each signal misses some games, so any one of them counts.
         let options = NSApp.currentSystemPresentationOptions
         let menuBarHidden = options.contains(.fullScreen) || options.contains(.hideMenuBar)
+        let heard = recentWindowFullscreen?(pid)
         queue.async { [weak self] in
-            let value = FrontFullscreenPolicy.isActive(windowFullscreen: Self.focusedWindowIsFullscreen(pid), menuBarHidden: menuBarHidden,
+            let value = FrontFullscreenPolicy.isActive(windowFullscreen: heard ?? Self.focusedWindowIsFullscreen(pid), menuBarHidden: menuBarHidden,
                                                        frontWindows: Self.windows(of: pid), displays: Self.displays())
             DispatchQueue.main.async { [weak self] in
                 self?.looking = false
@@ -185,14 +191,18 @@ enum BrowserTabs {
         return BrowserTabScript.offersChromiumTabs(dictionary: String(decoding: data, as: UTF8.self))
     }
 
+    /// Main queue only. A browser that has not answered yet is not asked again: every time the search opened it
+    /// started another script, and one that waits for a permission answer runs for twelve seconds.
+    private static var listing = SharedRequests<String, (String, [WindowHandle]?) -> Void>()
     /// Asks every running browser at once and delivers each answer on the main queue as it arrives: nil when that
     /// browser did not answer. The active tab of each window is left out because the window itself is already listed.
     static func list(_ answer: @escaping (_ browser: String, _ tabs: [WindowHandle]?) -> Void) {
         // Never address a browser that is not running: scripting it would launch it.
         for item in running {
+            guard listing.join(item.key, answer) else { continue }
             queue.async {
-                let tabs = tabs(of: item)
-                DispatchQueue.main.async { answer(item.key, tabs) }
+                let found = Self.tabs(of: item)
+                DispatchQueue.main.async { listing.finish(item.key).forEach { $0(item.key, found) } }
             }
         }
     }

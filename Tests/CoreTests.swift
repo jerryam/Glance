@@ -274,6 +274,7 @@ struct CoreTests {
         verifyOptimizations()
         verifyThreading()
         verifyStaleLists()
+        verifyIdleWork()
         verifyWindowShortcuts()
         verifySettingsEntry()
         verifyRecentOrder()
@@ -1262,6 +1263,33 @@ struct CoreTests {
         check(ledger.adoptLate(pid: 9, from: fourthRead), "最新一次读取的迟到回答可以采用")
         check(!ledger.adoptLate(pid: 9, from: fourthRead), "同一个回答不采用两次")
         check(ledger.adoptLate(pid: 12, from: firstRead), "列表里从没有过的应用，迟到的回答总是可以采用")
+    }
+    static func verifyIdleWork() {
+        check(IdleRefreshPolicy.delay(sinceLast: 60, fullscreen: false) == 0.25, "平时窗口有变化后，很快重新读取列表")
+        check(abs(IdleRefreshPolicy.delay(sinceLast: 0.2, fullscreen: false) - 0.8) < 0.0001, "平时一秒内最多重新读取一次")
+        check(IdleRefreshPolicy.delay(sinceLast: 60, fullscreen: true) == 1, "前台全屏时，窗口有变化后等一秒再读取")
+        check(IdleRefreshPolicy.delay(sinceLast: 1, fullscreen: true) == 4, "前台全屏时，五秒内最多重新读取一次")
+
+        var asking = SharedRequests<String, Int>()
+        check(asking.join("safari", 1), "第一次问浏览器时发出请求")
+        check(!asking.join("safari", 2), "它还没回答时再问，不发出新的请求")
+        check(asking.join("chrome", 3), "别的浏览器各问各的")
+        check(asking.finish("safari") == [1, 2], "回答到达时，等它的每一方都收到")
+        check(asking.finish("safari").isEmpty, "回答送出后不再有人等")
+        check(asking.join("safari", 4), "回答之后再问，重新发出请求")
+
+        // A pin that waits for its app has no process behind it: it resolves the same without the running apps
+        // and without the window server's numbers, which is why neither is fetched for it.
+        let planned = WindowDescriptor(id: "cg:5", windowID: 5, pid: 40, appName: "备忘录", bundleID: "com.apple.Notes", title: "本周计划",
+                                       minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        var waitingPin = WindowPin(planned)
+        waitingPin.id = ""; waitingPin.windowID = nil; waitingPin.pid = 0
+        let unrelated = WindowDescriptor(id: "cg:8", windowID: 8, pid: 41, appName: "邮件", bundleID: "com.apple.mail", title: "收件箱",
+                                         minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        check(PinPolicy.resolve([waitingPin], windows: [unrelated], runningApps: [:], liveWindowIDs: []) == [waitingPin], "等待应用回来的置顶，不查正在运行的应用和窗口编号也照样等着")
+        let reopened = WindowDescriptor(id: "cg:12", windowID: 12, pid: 77, appName: "备忘录", bundleID: "com.apple.Notes", title: "本周计划",
+                                        minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        check(PinPolicy.resolve([waitingPin], windows: [unrelated, reopened], runningApps: [:], liveWindowIDs: []).map(\.id) == ["cg:12"], "应用重新打开后，等待的置顶同样认回它的窗口")
     }
     static func verifyOptimizations() {
         check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: false), "列表刚读过且没有新事件时，快速松键直接切换")

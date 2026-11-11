@@ -81,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var gestureActive = false
     var recording = false
     var commandServer: WindowCommandServer?
-    var showing = false
+    var showing = false { didSet { if showing != oldValue { state.previewsShown = showing } } }
     var showGeneration = 0
     var pendingCommit = false
     var pendingFocusID: String?
@@ -178,15 +178,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         launcher.refreshIfNeeded()
         setupDockPreview()
+        state.previewsShown = showing
         menuBar.onRevealChange = { [weak self] in self?.updateStatusButton() }
         menuBar.onPointerMoved = { [weak self] in self?.frontFullscreen.lookIfDue() }
         frontFullscreen.onChange = { [weak self] in
             guard let self else { return }
             self.menuBar.pausedForFullscreen = self.frontFullscreen.active
             self.syncActivityTimers()
+            // Out of full screen: a read of the windows that was waiting the longer time need not wait any more.
+            if !self.frontFullscreen.active, self.idleRefresh != nil { self.scheduleIdleRefresh() }
             // A read that timed out said "not full screen", and the "ignore when full screen" rule goes by the last read.
             self.engine.refreshObservers()
         }
+        frontFullscreen.recentWindowFullscreen = { [weak self] pid in self?.engine.recentFullscreen(of: pid) }
         frontFullscreen.look()
         panelInput.currentState = { [weak self] in
             guard let self else { return PanelKeySnapshot() }
@@ -392,15 +396,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !showing, !sleeping, AXIsProcessTrusted() else { return }
         idleRefresh?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.showing, !self.sleeping else { return }
+            guard let self else { return }
+            self.idleRefresh = nil
+            guard !self.showing, !self.sleeping else { return }
             self.idleRefreshedAt = ProcessInfo.processInfo.systemUptime
             self.idleRefreshCount += 1
             self.engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in self?.syncPins(handles) }
         }
         idleRefresh = work
-        // Soon after the event, but at most once a second for an app that keeps opening windows.
         let sinceLast = ProcessInfo.processInfo.systemUptime - idleRefreshedAt
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.25, 1 - sinceLast), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + IdleRefreshPolicy.delay(sinceLast: sinceLast, fullscreen: frontFullscreen.active), execute: work)
     }
     /// Title changes only update those entries, and arrive in batches: a ticking title costs one filter and
     /// layout per batch at most.

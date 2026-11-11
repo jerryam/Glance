@@ -152,6 +152,10 @@ final class WindowEngine: ObservableObject {
     private(set) var lateScanCount = 0
     /// Which read each app's windows came from, so an answer that arrives late never replaces a newer one.
     private var scanLedger = ScanLedger()
+    /// Every window number the window server had at the last read, whatever its layer or size.
+    private(set) var liveWindowIDs = Set<UInt32>()
+    /// The last answer about a focused window that came from the app itself, and when.
+    private var focusRead: (pid: Int32, fullscreen: Bool, at: TimeInterval)?
     /// Window and app events so far, and how many of them the last finished read could have seen.
     private var cacheEvents = 0
     private var cacheEventsRead = 0
@@ -387,6 +391,7 @@ final class WindowEngine: ObservableObject {
         return (key, (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false)
     }
     private func applyFocus(pid: Int32, key: String?, fullscreen: Bool, frozen: Bool) {
+        if key != nil { focusRead = (pid: pid, fullscreen: fullscreen, at: ProcessInfo.processInfo.systemUptime) }
         let foreground = "\(pid):\(fullscreen)"
         if foreground != lastForeground { lastForeground = foreground; onForegroundChange?() }
         // Freeze MRU while selecting, but continue detecting remote fullscreen changes.
@@ -397,6 +402,11 @@ final class WindowEngine: ObservableObject {
         noteRecentUse()
         // Focus landed on a window the list has never seen, whichever event was missed.
         if key.hasPrefix("cg:"), !windows.contains(where: { $0.id == key }) { markCacheStale() }
+    }
+    /// Whether this app's focused window is full screen, when the app said so a moment ago. Nil when it has to be asked.
+    func recentFullscreen(of pid: Int32) -> Bool? {
+        guard let read = focusRead, read.pid == pid, ProcessInfo.processInfo.systemUptime - read.at <= 0.3 else { return nil }
+        return read.fullscreen
     }
     func refresh(frontPID: Int32?, completion: @escaping ([WindowHandle]) -> Void) {
         let request = refreshRequests.append(completion)
@@ -450,6 +460,7 @@ final class WindowEngine: ObservableObject {
         let history = focusHistory, activated = appHistory, appTimes = appRecent, firstSeen = self.firstSeen, scanTabs = self.scanTabs, known = windows
         worker.async { [weak self] in
             let dictionaries = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let everyWindow = Set(dictionaries.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
             let entries: [CGEntry] = dictionaries.compactMap { d in
                 guard (d[kCGWindowLayer as String] as? Int ?? 1) == 0,
                       let id = d[kCGWindowNumber as String] as? UInt32,
@@ -610,6 +621,7 @@ final class WindowEngine: ObservableObject {
                 let late = self.scanLedger.finish(read: read, answered: answeredApps, unanswered: unansweredApps, since: ledgerMark,
                                                   running: Set(apps.map(\.pid)))
                 let result = late.isEmpty ? sorted : Self.keeping(late, from: self.windows, in: sorted).sorted(by: inOrder)
+                self.liveWindowIDs = everyWindow
                 let ids = Set(result.map(\.id))
                 self.firstSeen = self.firstSeen.filter { ids.contains($0.key) }
                 for handle in result where self.firstSeen[handle.id] == nil { self.firstSeen[handle.id] = handle.descriptor.created }
