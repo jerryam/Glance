@@ -1073,6 +1073,7 @@ enum SettingSearchIndex {
         .init(1, "搜索时包含系统命令", "开始菜单 锁屏 睡眠 关机 重启 注销 废纸篓 lock sleep restart shutdown logout"),
         .init(1, "搜索时查找文件", "开始菜单 文件 文档 聚焦 spotlight file finder"), .init(1, "搜索时计算算式", "开始菜单 计算器 calculator 算式 加减乘除"),
         .init(1, "在结果最后提供网页搜索", "开始菜单 浏览器 百度 必应 google bing web 网址"), .init(1, "搜索引擎", "百度 必应 google bing duckduckgo 网页搜索"),
+        .init(1, "用开头的符号只看一类结果", "前缀 符号 筛选 过滤 开始菜单 命令 计算 文件 网页 prefix filter > = / ?"),
         .init(1, "按 Shift 单独反向选择", "反向 上一个 单修饰键"),
         .init(1, "使用方向键选择窗口", "arrow"), .init(1, "使用 H / J / K / L 选择窗口", "vim"),
         .init(1, "面板中的快捷键 · 点击按键可重新录制", "录制 关闭 退出 最小化 按键 半屏 填满 屏幕 置顶"),

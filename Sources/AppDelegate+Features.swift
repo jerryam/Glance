@@ -361,13 +361,16 @@ extension AppDelegate {
 
     /// A file search for each pause in the typing. A sum does not stop it: "11-9" is in the names of files too.
     func queryChanged(_ query: String) {
-        guard showing, !state.isDemo, settings.value.advanced.searchFiles else { fileSearch.cancel(); return }
-        fileSearch.search(query)
+        let (prefix, text) = SearchPrefix.split(query, enabled: settings.value.advanced.searchPrefixes)
+        // Behind another kind's mark, files would only be left out again.
+        guard showing, !state.isDemo, settings.value.advanced.searchFiles, prefix == nil || prefix == .files else { fileSearch.cancel(); return }
+        fileSearch.search(text)
     }
     /// Rows made from what was typed. Nothing here touches the network: a web row is only an address until it is chosen.
-    func queryItems(for query: String) -> [WindowHandle] {
-        guard showing, !state.isDemo, !query.isEmpty else { return [] }
+    func queryItems(for typed: String) -> [WindowHandle] {
         let advanced = settings.value.advanced
+        let (prefix, query) = SearchPrefix.split(typed, enabled: advanced.searchPrefixes)
+        guard showing, !state.isDemo, !query.isEmpty, prefix != .commands, prefix != .files else { return [] }
         func row(_ id: String, kind: LaunchKind, title: String, detail: String, target: String) -> WindowHandle {
             var descriptor = WindowDescriptor(id: id, windowID: nil, pid: 0, appName: detail, bundleID: "", title: title,
                                               minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
@@ -376,11 +379,11 @@ extension AppDelegate {
             return WindowHandle(descriptor: descriptor, ax: nil, icon: NSImage(systemSymbolName: kind.symbol, accessibilityDescription: nil))
         }
         var rows: [WindowHandle] = []
-        if advanced.searchCalculator, let value = Calculator.evaluate(query) {
+        if advanced.searchCalculator, prefix != .web, let value = Calculator.evaluate(query) {
             let answer = Calculator.format(value)
             rows.append(row("query:calculation", kind: .calculation, title: "= \(answer)", detail: query, target: answer))
         }
-        if advanced.searchWeb {
+        if advanced.searchWeb, prefix != .calculation {
             let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
             if let address = WebAddress.url(from: text) {
                 rows.append(row("query:web", kind: .web, title: "打开 \(text)", detail: address.host ?? text, target: address.absoluteString))

@@ -65,6 +65,14 @@ extension AppDelegate {
                 self.relayout()
                 return self.panel
             })
+            // ">" alone: every system command, and nothing else.
+            steps.append(SnapshotStep(name: "search-prefix-\(suffix)") { [unowned self] in
+                self.state.extraItems = self.launcher.results(apps: false, settingsPages: false, commands: true)
+                self.state.query = ">"
+                self.state.refilter(reset: true)
+                self.relayout()
+                return self.panel
+            })
             // The note after a calculation's answer is copied, where the panel was. It stays until the next step.
             steps.append(SnapshotStep(name: "notice-\(suffix)") { [unowned self] in
                 let place: NSRect? = self.panel.isVisible ? self.panel.frame : nil

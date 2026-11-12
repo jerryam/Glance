@@ -167,6 +167,21 @@ enum NativeBridge {
         guard let function = symbol(dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY), "SACLockScreenImmediate", as: Lock.self) else { return false }
         return function() == 0
     }
+    /// Which of the interfaces above this Mac has, by name, for the diagnostics: a false one is a feature on its
+    /// fallback. They are only looked up, never called.
+    static func availability() -> [String: Bool] {
+        let login = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY)
+        func has(_ handle: UnsafeMutableRawPointer?, _ name: String) -> Bool { handle.flatMap { dlsym($0, name) } != nil }
+        var found: [String: Bool] = [:]
+        for name in ["_AXUIElementGetWindow", "GetProcessForPID"] { found[name] = has(accessibility, name) }
+        if found["GetProcessForPID"] == false { found["GetProcessForPID"] = has(dlopen(nil, RTLD_LAZY), "GetProcessForPID") }
+        for name in ["CGSMainConnectionID", "CGSCopySpacesForWindows", "CGSCopyManagedDisplaySpaces", "_SLPSSetFrontProcessWithOptions",
+                     "SLPSPostEventRecordTo", "CGSSetSymbolicHotKeyEnabled", "CGSCopyActiveMenuBarDisplayIdentifier"] {
+            found[name] = has(skyLight, name)
+        }
+        found["SACLockScreenImmediate"] = has(login, "SACLockScreenImmediate")
+        return found
+    }
     static func menuBarDisplay() -> String? {
         typealias CopyDisplay = @convention(c) (UInt32) -> Unmanaged<CFString>?
         guard let connection, let function = symbol(skyLight, "CGSCopyActiveMenuBarDisplayIdentifier", as: CopyDisplay.self) else { return nil }

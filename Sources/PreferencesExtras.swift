@@ -393,6 +393,8 @@ struct AdvancedSettings: Codable, Equatable {
     /// After the displays change, put back the saved layout made on displays like the ones there are now. Off
     /// until asked for: it moves windows without being told to each time.
     var restoreLayoutOnScreenChange = false
+    /// ">", "=", "/" and "?" at the start of a search keep one kind of result (SearchPrefix).
+    var searchPrefixes = true
     init() {}
     private enum CodingKeys: String, CodingKey {
         case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning, searchSkips, shuangpin
@@ -401,7 +403,7 @@ struct AdvancedSettings: Codable, Equatable {
         case focusMethod, commandLineEnabled, dockBadges, restartAfterCrash, browserTabs, searchApps, searchSettingsPages, numberHints
         case titleDisplay, titleCut, panelScreen, followCursor, gesture, gestureProfile, haptics, arrowKeys, vimKeys
         case autoPreview, backgroundPreviews, statusBadges, spaceNumbers, tileButtons, showMenuIcon, menuIcon
-        case showDelay, fadeOut, previewFadeIn, bindings, exceptions, restoreLayoutOnScreenChange
+        case showDelay, fadeOut, previewFadeIn, bindings, exceptions, restoreLayoutOnScreenChange, searchPrefixes
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -468,6 +470,7 @@ struct AdvancedSettings: Codable, Equatable {
             exceptions.append(.uuRemote)
         }
         restoreLayoutOnScreenChange = try c.decodeIfPresent(Bool.self, forKey: .restoreLayoutOnScreenChange) ?? false
+        searchPrefixes = try c.decodeIfPresent(Bool.self, forKey: .searchPrefixes) ?? true
     }
 }
 struct WindowRect: Codable, Equatable {

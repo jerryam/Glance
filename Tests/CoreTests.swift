@@ -287,7 +287,69 @@ struct CoreTests {
         verifyStartMenu()
         verifyLayoutSnapshots()
         verifyCopyNotice()
+        verifySearchPrefixes()
         print("\(passed) checks passed")
+    }
+    static func verifySearchPrefixes() {
+        // Reading the mark.
+        func split(_ text: String, enabled: Bool = true) -> String { let (prefix, rest) = SearchPrefix.split(text, enabled: enabled); return "\(prefix?.rawValue ?? "-")|\(rest)" }
+        check(split(">lock") == ">|lock" && split(">  lock") == ">|lock", "> 后面有没有空格都可以")
+        check(split("=1+2") == "=|1+2" && split("/ 报告") == "/|报告" && split("? 天气") == "?|天气", "四个符号各自认得出")
+        check(split(".5+1") == "-|.5+1", "小数点开头不是符号，仍是算式")
+        check(split("lock") == "-|lock" && split("") == "-|" && split("a>b") == "-|a>b", "只认开头的符号")
+        check(split(">lock", enabled: false) == "-|>lock", "关掉以后符号当普通文字")
+        check(split(">") == ">|", "只输入符号时后面是空的")
+        for prefix in SearchPrefix.allCases { check(!prefix.label.isEmpty && !prefix.kinds.isEmpty, "每个符号都有说明：\(prefix.rawValue)") }
+        check(Set(SearchPrefix.allCases.flatMap(\.kinds).map { "\($0)" }).count == SearchPrefix.allCases.flatMap(\.kinds).count, "一类结果只属于一个符号")
+
+        // In the results.
+        func result(_ id: String, title: String, kind: LaunchKind?, pid: Int32 = 0) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: nil, pid: pid, appName: title, bundleID: kind == nil ? "w" : "", title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            d.launcher = kind
+            return d
+        }
+        func list(_ items: [WindowDescriptor], _ text: String, prefixes: Bool = true, grouping: WindowGrouping? = nil, exclusions: String = "") -> [String] {
+            var settings = UserSettings.defaults
+            settings.advanced.searchPrefixes = prefixes
+            settings.exclusions = exclusions
+            var profile = settings.shortcuts[0]
+            if let grouping { profile.grouping = grouping }
+            return WindowSearch.filtered(items, settings: settings, profile: profile, frontPID: nil, displayID: nil, query: text).map(\.id)
+        }
+        let mixed = [result("web", title: "用百度搜索", kind: .web), result("file", title: "wx 记录.txt", kind: .file), result("window", title: "wx 窗口", kind: nil, pid: 5),
+                     result("app", title: "wx 工具", kind: .app), result("command", title: "wx 命令", kind: .command), result("layout", title: "恢复布局：wx", kind: .layout),
+                     result("calc", title: "= 7", kind: .calculation)]
+        check(list(mixed, "> wx") == ["command", "layout"] || list(mixed, "> wx") == ["layout", "command"], "> 只留下系统命令和布局")
+        check(list(mixed, "/wx") == ["file"], "/ 只留下文件")
+        check(list(mixed, "=3+4") == ["calc"], "= 只留下计算结果")
+        check(list(mixed, "? wx") == ["web"], "? 只留下网页搜索")
+        check(!list(mixed, "> wx").contains("window") && !list(mixed, "/wx").contains("window"), "符号后面不出现窗口")
+        let commands = (0..<12).map { result("c\($0)", title: "wx 命令\($0)", kind: .command) }
+        check(list(commands, "wx").count == WindowSearch.launcherLimit, "没有符号时命令仍有数量上限")
+        check(list(commands, "> wx").count == commands.count, "> 后面列出全部匹配的命令，不受上限限制")
+        check(list(commands + mixed, ">").count == commands.count + 2, "只输入 > 列出全部命令和布局")
+        check(list(commands, ">", grouping: .byApp).count == commands.count, "按应用分组时，> 列出的命令也不合成一项")
+        check(list(mixed, "/").isEmpty && list(mixed, "?").isEmpty, "其他符号后面没有内容时什么都不列")
+        check(list(mixed, "").count == 1, "没有输入时仍只列窗口")
+        let plain = list(mixed, "> wx", prefixes: false)
+        check(plain.contains("calc") && plain.contains("web") && !plain.contains("command") && !plain.contains("layout"), "关掉符号后 > 当普通文字搜索，不再只留命令")
+        check(list(mixed, "wx", prefixes: true) == list(mixed, "wx", prefixes: false), "没有符号的搜索不受这个开关影响")
+
+        // Words to leave out, made once instead of for every window.
+        let notes = [result("plain", title: "wx 记事", kind: nil, pid: 6), result("secret", title: "wx 机密 secret", kind: nil, pid: 7)]
+        check(list(notes, "wx") == ["plain", "secret"] || list(notes, "wx") == ["secret", "plain"], "没有排除词时都列出")
+        check(list(notes, "wx", exclusions: "secret") == ["plain"], "排除词仍然有效")
+        check(list(notes, "wx", exclusions: "  SECRET  \n\n   ") == ["plain"], "排除词两端的空格和空行不影响，大小写不敏感")
+        check(list(notes, "", exclusions: "secret") == ["plain"], "排除词对不搜索时的列表也有效")
+
+        // The setting.
+        check(AdvancedSettings().searchPrefixes, "符号筛选默认打开")
+        var off = AdvancedSettings(); off.searchPrefixes = false
+        check(!(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(off))).searchPrefixes, "关掉后保存再读仍是关的")
+        var old = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(off)) as! [String: Any]
+        old.removeValue(forKey: "searchPrefixes")
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: old)).searchPrefixes, "旧设置里没有这一项时是打开的")
+        check(SettingSearchIndex.results("前缀").first?.title == "用开头的符号只看一类结果", "设置搜索可以找到符号筛选")
     }
     static func verifyCopyNotice() {
         check(CopyNotice.text(for: "42") == "已复制 42", "复制算式结果后提示复制了什么")

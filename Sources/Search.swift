@@ -8,6 +8,37 @@ struct SearchQuality: Equatable, Comparable {
     }
 }
 
+/// A mark at the start of a search that keeps only one kind of result: "> 锁定" lists commands and layouts and
+/// nothing else, "=" a sum, "/" files and "?" a web search. It never brings in a kind that is switched off.
+/// A dot is not one: ".5+1" is a sum.
+enum SearchPrefix: String, CaseIterable {
+    case commands = ">", calculation = "=", files = "/", web = "?"
+    var kinds: [LaunchKind] {
+        switch self {
+        case .commands: return [.command, .layout]
+        case .calculation: return [.calculation]
+        case .files: return [.file]
+        case .web: return [.web]
+        }
+    }
+    /// Beside the search field while the mark is typed.
+    var label: String {
+        switch self {
+        case .commands: return "只看系统命令和布局"
+        case .calculation: return "只看计算结果"
+        case .files: return "只看文件"
+        case .web: return "只看网页搜索"
+        }
+    }
+    /// With nothing after the mark, the whole list: there are few commands, and seeing them is the point.
+    var listsAllWhenEmpty: Bool { self == .commands }
+    /// The mark the search starts with, and what follows it. No mark when they are switched off.
+    static func split(_ query: String, enabled: Bool = true) -> (prefix: SearchPrefix?, rest: String) {
+        guard enabled, let first = query.first, let prefix = SearchPrefix(rawValue: String(first)) else { return (nil, query) }
+        return (prefix, String(query.dropFirst().drop(while: { $0.isWhitespace })))
+    }
+}
+
 enum WindowSearch {
     /// At most this many apps and settings pages join one search.
     static let launcherLimit = 8
@@ -149,9 +180,10 @@ enum WindowSearch {
         return true
     }
     static func filtered(_ windows: [WindowDescriptor], settings: UserSettings, profile: ShortcutProfile,
-                         frontPID: Int32?, displayID: UInt32?, query: String,
+                         frontPID: Int32?, displayID: UInt32?, query typed: String,
                          cursorX: Double? = nil, cursorY: Double? = nil, expandedApp: Int32? = nil, learned: [String: Double] = [:]) -> [WindowDescriptor] {
-        let excluded = settings.exclusions.components(separatedBy: .newlines).map(normalized).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let (prefix, query) = SearchPrefix.split(typed, enabled: settings.advanced.searchPrefixes)
+        let excluded = settings.exclusions.components(separatedBy: .newlines).map { normalized($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let minimized = profile.minimized ?? (settings.showMinimized ? .show : .hide)
         let hidden = profile.hidden ?? (settings.showHidden ? .show : .hide)
         let windowless = profile.windowless ?? (settings.showWindowlessApps ? .atEnd : .hide)
@@ -162,8 +194,9 @@ enum WindowSearch {
         let tokens = normalized(query).split(whereSeparator: { $0.isWhitespace }).map(String.init)
         var quality: [String: SearchQuality] = [:]
         var candidates = windows.filter { w in
+            if let prefix, !(w.launcher.map { prefix.kinds.contains($0) } ?? false) { return false }
             // Browser tabs only join a search; plain ⌥Tab keeps showing windows.
-            if w.searchOnly && tokens.isEmpty { return false }
+            if w.searchOnly && tokens.isEmpty && prefix?.listsAllWhenEmpty != true { return false }
             if windowless == .hide && w.windowless { return false }
             if minimized == .hide && w.minimized { return false }
             if hidden == .hide && w.hidden { return false }
@@ -177,8 +210,11 @@ enum WindowSearch {
             if profile.spaceScope == .visible && !w.onCurrentSpace { return false }
             if profile.spaceScope == .other && (w.onCurrentSpace || w.windowless || w.searchOnly) { return false }
             if settings.advanced.exceptions.contains(where: { $0.hides(w) }) { return false }
-            let text = normalized("\(w.appName) \(w.bundleID) \(w.title)")
-            if excluded.contains(where: { text.contains($0.trimmingCharacters(in: .whitespaces)) }) { return false }
+            // Most people have no words to leave out: then there is no text to make for each window.
+            if !excluded.isEmpty {
+                let text = normalized("\(w.appName) \(w.bundleID) \(w.title)")
+                if excluded.contains(where: { text.contains($0) }) { return false }
+            }
             if w.launcher?.madeFromQuery == true { quality[w.id] = SearchQuality(weakest: 15, total: 15); return true }
             guard let rank = rank(w, tokens: tokens, allowTypos: settings.advanced.searchTypos, skips: settings.advanced.searchSkips, shuangpin: settings.advanced.shuangpin) else { return false }
             quality[w.id] = rank
@@ -227,8 +263,9 @@ enum WindowSearch {
         // Things to open fill in after the windows; a short query should not flood the list with apps.
         var launchers = 0
         candidates = candidates.filter { candidate in
-            // Files come limited already, and a sum or a web search is one row each.
-            guard candidate.launcher?.place == 1 else { return true }
+            // Files come limited already, and a sum or a web search is one row each. Behind a mark, only the one
+            // kind is left, and all of it is wanted.
+            guard prefix == nil, candidate.launcher?.place == 1 else { return true }
             launchers += 1
             return launchers <= WindowSearch.launcherLimit
         }
@@ -236,7 +273,7 @@ enum WindowSearch {
             var seen = Set<Int32>(); candidates = candidates.filter { $0.searchOnly || seen.insert($0.pid).inserted }
         }
         // Grouping folds each app into one entry; ↓ expands an app, and searching always lists every window.
-        if profile.grouping == .byApp && tokens.isEmpty {
+        if profile.grouping == .byApp && tokens.isEmpty && prefix == nil {
             if let expandedApp {
                 candidates = candidates.filter { $0.pid == expandedApp }
             } else {

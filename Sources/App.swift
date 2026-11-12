@@ -728,6 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func diagnostics() -> [String: Any] {
         ["version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
          "permissions": ["accessibility": AXIsProcessTrusted(), "screenCapture": CGPreflightScreenCaptureAccess()],
+         "privateInterfaces": NativeBridge.availability(),
          "timings": RuntimeDiagnostics.shared.summary, "windowCount": engine.windows.count,
          "previewCacheEstimatedBytes": state.previewBytes, "previewCacheLimitBytes": 32 * 1024 * 1024,
          "previewCapturesActive": capture.activeCount, "previewCapturesQueued": capture.queuedCount,
@@ -765,6 +766,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "searchApps": advanced.searchApps, "searchSettingsPages": advanced.searchSettingsPages, "searchCommands": advanced.searchCommands,
             "searchFiles": advanced.searchFiles, "searchCalculator": advanced.searchCalculator, "searchWeb": advanced.searchWeb,
             "searchLearning": advanced.searchLearning, "searchSkips": advanced.searchSkips, "searchTypos": advanced.searchTypos,
+            "searchPrefixes": advanced.searchPrefixes, "restoreLayoutOnScreenChange": advanced.restoreLayoutOnScreenChange,
             "shuangpin": advanced.shuangpin.rawValue, "restartAfterCrash": advanced.restartAfterCrash, "commandLine": advanced.commandLineEnabled,
             "dockPreview": dock.enabled, "dockLiveThumbnails": dock.liveThumbnails, "dockPeekWindow": dock.peekWindow,
             "menuBar": settings.value.menuBar.enabled, "windowShortcuts": settings.value.windowShortcuts.enabled,

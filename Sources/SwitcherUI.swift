@@ -73,10 +73,16 @@ final class SwitcherState: ObservableObject {
     var selected: WindowHandle? { items.indices.contains(selectedIndex) ? items[selectedIndex] : nil }
     var showsToolbar: Bool { sticky && !searchVisible }
     /// How the selected result matched, for the pill beside the search field.
+    /// Behind a mark such as ">", the pill says what the mark keeps rather than how one result matched.
     var matchLabel: String? {
-        guard searchVisible, !query.isEmpty, let selected else { return nil }
+        guard searchVisible, !query.isEmpty else { return nil }
+        if let prefix = searchPrefix { return prefix.label }
+        guard let selected else { return nil }
         return WindowSearch.matchKind(selected.descriptor, query: query, allowTypos: settings.advanced.searchTypos, skips: settings.advanced.searchSkips, shuangpin: settings.advanced.shuangpin)?.label
     }
+    var searchPrefix: SearchPrefix? { SearchPrefix.split(query, enabled: settings.advanced.searchPrefixes).prefix }
+    /// What the names are matched against: the search without its mark.
+    var searchText: String { SearchPrefix.split(query, enabled: settings.advanced.searchPrefixes).rest }
     func isAtEnd(_ d: WindowDescriptor) -> Bool { WindowSearch.isAtEnd(d, settings: settings, profile: profile) }
     /// In the list style, a divider separates windows placed at the end (minimized, no window …).
     var atEndDividerIndex: Int? {
@@ -1007,12 +1013,12 @@ private struct SearchRow: View {
             HStack(spacing: 12) {
                 BadgedIcon(icon: item.icon, size: 30, badge: state.badges[item.descriptor.pid])
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(highlighted(item.descriptor.displayTitle, query: state.query, advanced: state.settings.advanced))
+                    Text(highlighted(item.descriptor.displayTitle, query: state.searchText, advanced: state.settings.advanced))
                         .font(.system(size: 14, weight: selected ? .bold : .semibold)).foregroundStyle(GlanceDesign.ink).lineLimit(1)
                     HStack(spacing: 0) {
                         // Something to open without an English name would repeat its title here.
                         let showsApp = !(item.descriptor.launcher != nil && item.descriptor.appName == item.descriptor.title)
-                        if showsApp { Text(highlighted(item.descriptor.appName, query: state.query, advanced: state.settings.advanced)) }
+                        if showsApp { Text(highlighted(item.descriptor.appName, query: state.searchText, advanced: state.settings.advanced)) }
                         let rest = state.details(for: item.descriptor, includeApp: false)
                         if !rest.isEmpty { Text((showsApp ? " · " : "") + rest.joined(separator: " · ")) }
                     }.font(.system(size: 12)).foregroundStyle(GlanceDesign.secondary).lineLimit(1)
@@ -1063,7 +1069,8 @@ private struct SearchDetail: View {
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").font(.system(size: 30, weight: .light)).foregroundStyle(GlanceDesign.accentText)
-                    Text(state.query.isEmpty ? "输入后在这里预览窗口" : "没有找到匹配的窗口").font(.system(size: 13)).foregroundStyle(GlanceDesign.secondary)
+                    Text(state.query.isEmpty ? "输入后在这里预览窗口" : (state.searchPrefix.map { "\($0.label)：没有结果" } ?? "没有找到匹配的窗口"))
+                        .font(.system(size: 13)).foregroundStyle(GlanceDesign.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.padding(20)
