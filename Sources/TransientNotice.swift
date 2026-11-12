@@ -28,7 +28,7 @@ final class TransientNotice {
         let origin = NSPoint(x: min(max(middle.x - size.width / 2, area.minX + 8), area.maxX - size.width - 8),
                              y: min(max(middle.y - size.height / 2, area.minY + 8), area.maxY - size.height - 8))
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
-        panel.alphaValue = 1
+        Self.opaque(panel)
         panel.orderFrontRegardless()
         if NSWorkspace.shared.isVoiceOverEnabled {
             NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
@@ -44,8 +44,18 @@ final class TransientNotice {
     /// At once, as when the switcher opens again.
     func hide() {
         generation += 1
-        panel?.orderOut(nil)
-        panel?.alphaValue = 1
+        guard let panel else { return }
+        panel.orderOut(nil)
+        Self.opaque(panel)
+    }
+
+    /// Through the animator, so a fade still running from the last note is replaced rather than left to finish
+    /// on the next one.
+    private static func opaque(_ panel: NSWindow) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            panel.animator().alphaValue = 1
+        }
     }
 
     private func fade(_ shown: Int) {
