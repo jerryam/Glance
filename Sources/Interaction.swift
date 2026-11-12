@@ -437,6 +437,12 @@ enum DockPreviewPolicy {
     /// Pressed on one card and let go on another is not a click on either.
     static func middleClickTarget(down: String?, up: String?) -> String? { down == up ? up : nil }
 
+    /// The card drawn at a point, or nil in the gaps between cards and outside them. Cards do not overlap; if two
+    /// ever claimed the point, the answer would still be the same one each time.
+    static func card(at point: CGPoint, frames: [String: CGRect]) -> String? {
+        frames.filter { !$0.value.isEmpty && $0.value.contains(point) }.map(\.key).min()
+    }
+
     /// Whether the cards still show the same thing: a window can stay in the list and only change state.
     static func sameCards(_ a: [WindowDescriptor], _ b: [WindowDescriptor]) -> Bool {
         a.map { "\($0.id)|\($0.minimized)|\($0.hidden)" } == b.map { "\($0.id)|\($0.minimized)|\($0.hidden)" }

@@ -771,6 +771,22 @@ struct CoreTests {
         check(p.hoverAfterRefresh("b", old: ["a", "b"], new: ["b", "a"]) == nil, "卡片换了顺序也一样")
         check(p.hoverAfterRefresh(nil, old: ["a"], new: ["a"]) == nil && p.hoverAfterRefresh("x", old: ["a"], new: ["a"]) == nil, "原来不在卡片上，刷新后也不在")
 
+        // The card under a pointer that has not moved, from where the cards are drawn.
+        let before = ["a": CGRect(x: 14, y: 50, width: 200, height: 150), "b": CGRect(x: 224, y: 50, width: 200, height: 150)]
+        let point = CGPoint(x: 100, y: 120)
+        check(p.card(at: point, frames: before) == "a", "按卡片画的位置认出指针下的卡片")
+        // "a" closed and "b" moved into its place: the pointer is on "b" now without having moved.
+        let after = ["b": CGRect(x: 14, y: 50, width: 200, height: 150)]
+        check(p.card(at: point, frames: after) == "b", "卡片挪到指针下以后，不移动鼠标也认得出新卡片")
+        check(p.card(at: CGPoint(x: 219, y: 120), frames: before) == nil, "两张卡片之间的空隙不算在任何一张上")
+        check(p.card(at: CGPoint(x: 100, y: 20), frames: before) == nil, "标题栏那一行不算卡片")
+        check(p.card(at: point, frames: [:]) == nil, "还没有排版时不猜")
+        check(p.card(at: point, frames: ["a": .zero, "b": CGRect(x: 90, y: 110, width: 0, height: 40)]) == nil, "大小为零的卡片不算")
+        let overlap = ["z": CGRect(x: 0, y: 0, width: 300, height: 300), "m": CGRect(x: 0, y: 0, width: 300, height: 300)]
+        check(p.card(at: point, frames: overlap) == "m" && p.card(at: point, frames: overlap) == p.card(at: point, frames: overlap), "万一重叠，每次给出同一张")
+        // A middle click pressed on "a", which then moved away, and let go on "b", now in its place, closes neither.
+        check(p.middleClickTarget(down: p.card(at: point, frames: before), up: p.card(at: point, frames: after)) == nil, "按下和松开之间卡片挪了位置时不关闭")
+
         // A card's picture made from the full-size frame.
         func small(_ width: Int, _ height: Int, _ pixels: Int) -> [Int]? {
             p.thumbnailSize(width: width, height: height, pixelWidth: pixels).map { [$0.width, $0.height] }

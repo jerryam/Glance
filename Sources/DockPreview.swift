@@ -26,6 +26,18 @@ final class DockPreviewState: ObservableObject {
     /// The right-click menu's other choices.
     var onAction: ((WindowHandle, WindowAction) -> Void)?
     var onHover: ((String?) -> Void)?
+    /// Where each card is, from the panel's top left. Not published: it changes as the cards are laid out and
+    /// draws nothing itself.
+    var cardFrames: [String: CGRect] = [:]
+    /// The cards were laid out again, perhaps under a pointer that has not moved.
+    var onCardsMoved: (() -> Void)?
+}
+
+/// Each card's frame in the panel, so the card under the pointer is known without the pointer moving.
+private struct DockCardFrames: PreferenceKey {
+    static let space = "dockPreviewPanel"
+    static var defaultValue: [String: CGRect] { [:] }
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue(), uniquingKeysWith: { _, new in new }) }
 }
 
 enum DockPreviewMetrics {
@@ -120,6 +132,7 @@ final class DockPreviewController {
         state.onClose = { [weak self] handle in self?.close(handle) }
         state.onAction = { [weak self] handle, action in self?.act(action, on: handle) }
         state.onHover = { [weak self] id in self?.hoverChanged(id) }
+        state.onCardsMoved = { [weak self] in self?.cardsMoved() }
         capture.receiveFull = { [weak self] id, image in self?.showPeek(id, image: image) }
         menuObservers.append(NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in self?.menuOpen = true })
         menuObservers.append(NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in self?.menuOpen = false })
@@ -496,10 +509,12 @@ final class DockPreviewController {
             self.hide(reason: "click")
         }
         // Only a click on this panel: a middle click elsewhere goes to the global monitor above, like any other.
+        // The card is the one under the click itself, which is right even when the cards have just moved.
         middleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { [weak self] event in
             guard let self, event.window === self.panel, event.buttonNumber == 2 else { return event }
-            if event.type == .otherMouseDown { self.middleDownID = self.state.hoveredID; return nil }
-            let target = DockPreviewPolicy.middleClickTarget(down: self.middleDownID, up: self.state.hoveredID)
+            let under = self.card(atWindowPoint: event.locationInWindow)
+            if event.type == .otherMouseDown { self.middleDownID = under; return nil }
+            let target = DockPreviewPolicy.middleClickTarget(down: self.middleDownID, up: under)
             self.middleDownID = nil
             if let target, let handle = self.state.items.first(where: { $0.id == target }) { self.close(handle) }
             return nil
@@ -526,6 +541,21 @@ final class DockPreviewController {
 
     /// A menu on a card: the pointer may be anywhere in it, outside the panel, and the panel still has to stay.
     private var menuTracking: Bool { menuOpen || RunLoop.main.currentMode == .eventTracking }
+
+    /// The card at a point in the panel's window coordinates (from its bottom left), by where the cards are drawn.
+    private func card(atWindowPoint point: NSPoint) -> String? {
+        guard let panel else { return nil }
+        let height = panel.contentView?.bounds.height ?? panel.frame.height
+        return DockPreviewPolicy.card(at: CGPoint(x: point.x, y: height - point.y), frames: state.cardFrames)
+    }
+
+    /// The cards moved, as after one was closed: the pointer has not, so the system says nothing about which card
+    /// it is on now. Where the cards are drawn does, and the × and a middle click are for that card at once.
+    private func cardsMoved() {
+        guard let panel, panel.isVisible, !menuTracking else { return }
+        let under = card(atWindowPoint: panel.convertPoint(fromScreen: NSEvent.mouseLocation))
+        if under != state.hoveredID { state.hoveredID = under }
+    }
 
     /// Asks for new pictures of the cards whose turn it is, and of the window being shown at its own place.
     private func refreshLive() {
@@ -740,6 +770,11 @@ struct DockPreviewView: View {
         }
         .padding(DockPreviewMetrics.padding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .coordinateSpace(name: DockCardFrames.space)
+        .onPreferenceChange(DockCardFrames.self) { frames in
+            state.cardFrames = frames
+            state.onCardsMoved?()
+        }
         .modifier(GlancePanelBackdrop())
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(state.appName) 的窗口")
@@ -783,6 +818,9 @@ private struct DockPreviewCard: View {
             RoundedRectangle(cornerRadius: GlanceDesign.cardRadius, style: .continuous)
                 .fill(hovered ? GlanceDesign.raised : Color.clear)
         }
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: DockCardFrames.self, value: [item.id: proxy.frame(in: .named(DockCardFrames.space))])
+        })
         .overlay {
             if hovered {
                 RoundedRectangle(cornerRadius: GlanceDesign.cardRadius + 1, style: .continuous)
