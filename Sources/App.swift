@@ -29,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let launcher = LaunchCatalog()
     let fileSearch = FileSearch()
     let dockPreview = DockPreviewController()
+    /// "已复制 …" after the panel closes on a calculation.
+    let notice = TransientNotice()
     let frontFullscreen = FrontFullscreenWatch()
     var browserTabs = BrowserTabCache<WindowHandle>()
     var panel: SwitcherPanel!
@@ -117,6 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.animationBehavior = .utilityWindow
         panel.contentView = materialView(NSHostingView(rootView: SwitcherView(state: state).frame(maxWidth: .infinity, maxHeight: .infinity)))
+        notice.background = { [weak self] hosting, frame in
+            self?.materialView(hosting, frame: frame, radius: TransientNoticeView.height / 2) ?? hosting
+        }
         loadPins()
         engine.restoreRecentOrder()
         loadSearchHabits()
@@ -424,7 +429,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// The panel background: Liquid Glass on macOS 26 and later, a popover material before that.
     /// The system turns the glass opaque by itself when Reduce Transparency is on.
-    func materialView<Content: View>(_ hosting: NSHostingView<Content>, frame: NSRect = NSRect(x: 0, y: 0, width: 850, height: 580)) -> NSView {
+    func materialView<Content: View>(_ hosting: NSHostingView<Content>, frame: NSRect = NSRect(x: 0, y: 0, width: 850, height: 580),
+                                     radius: CGFloat = GlanceDesign.panelRadius) -> NSView {
         hosting.sizingOptions = []
         hosting.autoresizingMask = [.width, .height]
         if #available(macOS 26.0, *) {
@@ -432,7 +438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Regular glass keeps text legible over any desktop; clear glass is meant for photos and video.
             // The panel is a surface, not a control, so it does not react to the pointer.
             glass.style = .regular
-            glass.cornerRadius = GlanceDesign.panelRadius
+            glass.cornerRadius = radius
             glass.autoresizingMask = [.width, .height]
             hosting.frame = glass.bounds
             glass.contentView = hosting
@@ -440,7 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let material = NSVisualEffectView(frame: frame)
         material.material = .popover; material.blendingMode = .behindWindow; material.state = .active
-        material.wantsLayer = true; material.layer?.cornerRadius = GlanceDesign.panelRadius; material.layer?.masksToBounds = true
+        material.wantsLayer = true; material.layer?.cornerRadius = radius; material.layer?.masksToBounds = true
         material.autoresizingMask = [.width, .height]
         hosting.frame = material.bounds
         material.addSubview(hosting)
@@ -634,7 +640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func show(profile: ShortcutProfile, initialStep: Int, startSearching: Bool = false) {
         showStarted = ProcessInfo.processInfo.systemUptime; firstPreviewRecorded = false
         idleRefresh?.cancel(); idleRefresh = nil
-        capture.cancel(); previewPanel?.orderOut(nil); dockPreview.hide(reason: "switcher")
+        capture.cancel(); previewPanel?.orderOut(nil); dockPreview.hide(reason: "switcher"); notice.hide()
         setSettingsAside()
         state.frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         state.cursor = CGEvent(source: nil)?.location
@@ -991,8 +997,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if selected.descriptor.launcher != nil {
+            // Where the panel was, for the note that says what was copied. Taken before it goes.
+            let place: NSRect? = panel.isVisible ? panel.frame : nil
+            let appearance = panel.appearance
             dismiss()
-            if !openLauncherItem(selected.descriptor) { NSSound.beep() }
+            if !openLauncherItem(selected.descriptor) { NSSound.beep(); return }
+            if selected.descriptor.launcher == .calculation, let answer = selected.descriptor.launchTarget {
+                notice.show(CopyNotice.text(for: answer), symbol: CopyNotice.symbol, around: place, appearance: appearance)
+            }
             return
         }
         if selected.descriptor.settingsWindow {

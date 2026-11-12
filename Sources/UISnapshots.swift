@@ -23,7 +23,7 @@ extension AppDelegate {
         var steps: [SnapshotStep] = []
         for (dark, suffix) in [(false, "light"), (true, "dark")] {
             steps.append(SnapshotStep(name: nil) { [unowned self] in
-                self.dismiss()
+                self.dismiss(); self.notice.hide()
                 NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 self.panel.appearance = nil; self.settingsWindow?.appearance = nil; self.previewPanel?.appearance = nil
                 Self.saveAppIcon(to: folder.appendingPathComponent("icon-\(suffix).png"))
@@ -65,13 +65,20 @@ extension AppDelegate {
                 self.relayout()
                 return self.panel
             })
+            // The note after a calculation's answer is copied, where the panel was. It stays until the next step.
+            steps.append(SnapshotStep(name: "notice-\(suffix)") { [unowned self] in
+                let place: NSRect? = self.panel.isVisible ? self.panel.frame : nil
+                self.dismiss()
+                self.notice.show(CopyNotice.text(for: "1234.5"), symbol: CopyNotice.symbol, around: place, appearance: nil, duration: nil)
+                return self.notice.window
+            })
         }
         let canCapture = CGPreflightScreenCaptureAccess()
         var written: [String] = [], missing: [String] = [], drawn = 0
         var current: NSWindow?
         func run(_ position: Int, part: Int) {
             guard position < steps.count else {
-                dismiss(); settingsWindow?.orderOut(nil); backdrop.orderOut(nil)
+                dismiss(); notice.hide(); settingsWindow?.orderOut(nil); backdrop.orderOut(nil)
                 state.query = ""; state.searchVisible = false
                 NSApp.appearance = nil
                 applySettings()

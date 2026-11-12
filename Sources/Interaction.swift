@@ -387,6 +387,23 @@ enum SettingsReturnPolicy {
     static func comesToFront(wasKey: Bool, cancelled: Bool, demo: Bool) -> Bool { wasKey && (cancelled || demo) }
 }
 
+/// The note shown for a moment after a calculation's answer is copied: what the clipboard holds now, cut short when
+/// it is long. The clipboard always gets all of it.
+enum CopyNotice {
+    static let duration: TimeInterval = 1.4
+    static let symbol = "doc.on.clipboard"
+    /// Characters of the answer shown.
+    static let longest = 32
+    /// Points: the note never grows wider than this, whatever the font does.
+    static let widest: CGFloat = 420
+    static func text(for answer: String) -> String {
+        let shown = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if shown.isEmpty { return "已复制" }
+        guard shown.count > longest else { return "已复制 \(shown)" }
+        return "已复制 \(shown.prefix(longest - 1))…"
+    }
+}
+
 /// The decisions behind the Dock preview's live pictures, its right-click actions and showing a window in place.
 enum DockPreviewPolicy {
     static let liveTick: TimeInterval = 1

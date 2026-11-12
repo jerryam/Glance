@@ -286,7 +286,18 @@ struct CoreTests {
         verifyCrashRestart()
         verifyStartMenu()
         verifyLayoutSnapshots()
+        verifyCopyNotice()
         print("\(passed) checks passed")
+    }
+    static func verifyCopyNotice() {
+        check(CopyNotice.text(for: "42") == "已复制 42", "复制算式结果后提示复制了什么")
+        check(CopyNotice.text(for: " 3.5 \n") == "已复制 3.5", "提示里去掉结果两端的空白")
+        check(CopyNotice.text(for: "") == "已复制", "结果为空时提示也不留多余空格")
+        let long = String(repeating: "9", count: 40)
+        let shown = CopyNotice.text(for: long)
+        check(shown.hasSuffix("…") && shown.count == "已复制 ".count + CopyNotice.longest, "很长的结果在提示里截短，以省略号结尾")
+        check(CopyNotice.text(for: String(repeating: "9", count: CopyNotice.longest)).hasSuffix("9"), "刚好到上限的结果完整显示")
+        check(CopyNotice.duration > 0.5 && CopyNotice.duration < 3, "提示停留时间够看清，又不会挡住接下来的操作")
     }
     static func verifyLayoutSnapshots() {
         let place = WindowRect(x: 10, y: 40, width: 300, height: 200)
