@@ -531,7 +531,7 @@ struct SettingsView: View {
             }
             SettingsGroup("全局窗口快捷键") {
                 SettingsToggle("启用全局窗口快捷键", isOn: $model.draft.windowShortcuts.enabled)
-                SettingsNote("不用打开面板，在任何应用里调整当前窗口的位置和大小；面板打开时作用于选中的窗口。“还原”回到一瞥调整之前的位置。需要辅助功能权限，一瞥自己的窗口除外；没能调整时会发出提示音。")
+                SettingsNote("不用打开面板，在任何应用里调整当前窗口的位置和大小，或把它移到下一块屏幕；面板打开时作用于选中的窗口。“还原”回到一瞥调整之前的位置。需要辅助功能权限，一瞥自己的窗口除外；没能调整时会发出提示音。")
                 if model.draft.windowShortcuts.enabled {
                     ForEach($model.draft.windowShortcuts.shortcuts) { $shortcut in
                         LabeledContent(shortcut.command.label) {

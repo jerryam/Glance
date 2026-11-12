@@ -1026,7 +1026,7 @@ enum SettingSearchIndex {
         .init(1, "按 Shift 单独反向选择", "反向 上一个 单修饰键"),
         .init(1, "使用方向键选择窗口", "arrow"), .init(1, "使用 H / J / K / L 选择窗口", "vim"),
         .init(1, "面板中的快捷键 · 点击按键可重新录制", "录制 关闭 退出 最小化 按键 半屏 填满 屏幕 置顶"),
-        .init(1, "启用全局窗口快捷键", "半屏 四分屏 三分屏 分屏 居中 还原 窗口位置 全局 snap tile"),
+        .init(1, "启用全局窗口快捷键", "半屏 四分屏 三分屏 分屏 居中 还原 窗口位置 全局 下一块屏幕 多显示器 snap tile next display"),
         .init(1, "窗口布局", "布局 快照 保存 恢复 工作区 多显示器 layout snapshot workspace"),
         .init(2, "外观", "液态玻璃 liquid glass"), .init(2, "显示样式", "图标 缩略图 列表 style"),
         .init(2, "主题", "浅色 深色 跟随系统 theme"), .init(2, "显示标题", "窗口 应用 名称"),

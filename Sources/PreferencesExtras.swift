@@ -195,7 +195,8 @@ enum WindowLayoutCommand: String, CaseIterable, Identifiable, Codable {
     case leftHalf, rightHalf, topHalf, bottomHalf
     case topLeft, topRight, bottomLeft, bottomRight
     case leftThird, centerThird, rightThird
-    case maximize, center, restore
+    // Added last: a command's place in this list is its hotkey slot, so the others keep theirs.
+    case maximize, center, restore, nextScreen
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -204,6 +205,7 @@ enum WindowLayoutCommand: String, CaseIterable, Identifiable, Codable {
         case .bottomLeft: return "左下四分之一"; case .bottomRight: return "右下四分之一"
         case .leftThird: return "左三分之一"; case .centerThird: return "中间三分之一"; case .rightThird: return "右三分之一"
         case .maximize: return "填满屏幕"; case .center: return "居中"; case .restore: return "还原"
+        case .nextScreen: return "移到下一块屏幕"
         }
     }
     /// nil for 还原, which goes back to a remembered place rather than to a place on the screen.
@@ -213,9 +215,11 @@ enum WindowLayoutCommand: String, CaseIterable, Identifiable, Codable {
         case .topLeft: return .topLeft; case .topRight: return .topRight; case .bottomLeft: return .bottomLeft; case .bottomRight: return .bottomRight
         case .leftThird: return .leftThird; case .centerThird: return .centerThird; case .rightThird: return .rightThird
         case .maximize: return .maximize; case .center: return .center; case .restore: return nil
+        case .nextScreen: return .nextScreen
         }
     }
     /// ⌃⌥ with the arrows for halves, U I J K for quarters, D F G for thirds, Return to fill, C to centre, Delete to restore.
+    /// ⌃⌥⌘→ moves to the next screen, as in other window managers: ⌃⌥→ is already the right half.
     var defaultHotkey: MenuBarHotkey {
         let code: UInt32
         switch self {
@@ -223,6 +227,7 @@ enum WindowLayoutCommand: String, CaseIterable, Identifiable, Codable {
         case .topLeft: code = 32; case .topRight: code = 34; case .bottomLeft: code = 38; case .bottomRight: code = 40
         case .leftThird: code = 2; case .centerThird: code = 3; case .rightThird: code = 5
         case .maximize: code = 36; case .center: code = 8; case .restore: code = 51
+        case .nextScreen: return MenuBarHotkey(keyCode: 124, modifiers: [.control, .option, .command], enabled: true)
         }
         return MenuBarHotkey(keyCode: code, modifiers: [.control, .option], enabled: true)
     }
@@ -241,7 +246,7 @@ struct WindowShortcut: Codable, Equatable, Identifiable {
     var id: String { command.rawValue }
 }
 struct WindowShortcutSettings: Codable, Equatable {
-    /// Off until asked for: turned on, it claims fourteen key combinations in every app.
+    /// Off until asked for: turned on, it claims fifteen key combinations in every app.
     var enabled = false
     var shortcuts = WindowLayoutCommand.allCases.map { WindowShortcut(command: $0, hotkey: $0.defaultHotkey) }
     /// The shortcuts to register.

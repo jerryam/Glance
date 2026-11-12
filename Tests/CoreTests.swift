@@ -1099,8 +1099,15 @@ struct CoreTests {
         let commands = WindowLayoutCommand.allCases
         let places: [(WindowLayoutCommand, WindowArrangement.Kind)] = [(.leftHalf, .left), (.rightHalf, .right), (.topHalf, .top), (.bottomHalf, .bottom),
             (.topLeft, .topLeft), (.topRight, .topRight), (.bottomLeft, .bottomLeft), (.bottomRight, .bottomRight),
-            (.leftThird, .leftThird), (.centerThird, .centerThird), (.rightThird, .rightThird), (.maximize, .maximize), (.center, .center)]
+            (.leftThird, .leftThird), (.centerThird, .centerThird), (.rightThird, .rightThird), (.maximize, .maximize), (.center, .center),
+            (.nextScreen, .nextScreen)]
         check(places.allSatisfy { $0.0.kind == $0.1 } && places.count == commands.count - 1 && WindowLayoutCommand.restore.kind == nil, "每个命令对应正确的位置，还原不对应屏幕上的位置")
+        // Added after the others, so the fourteen that were there keep their hotkey slots.
+        check(commands.last == .nextScreen && WindowLayoutCommand.restore.slot == WindowLayoutCommand.firstSlot + 13, "移到下一块屏幕排在最后，原来的命令的快捷键位置不变")
+        let nextKey = WindowLayoutCommand.nextScreen.defaultHotkey
+        check(nextKey.keyCode == 124 && nextKey.modifiers == [.control, .option, .command] && nextKey.combinationKey != WindowLayoutCommand.rightHalf.defaultHotkey.combinationKey,
+              "移到下一块屏幕默认是 ⌃⌥⌘→，不和 ⌃⌥→ 的右半屏冲突")
+        check(WindowArrangement.frame(.nextScreen, window: window, screens: [screens[0]]) == nil, "只有一块屏幕时，移到下一块屏幕什么也不做")
         check(commands.allSatisfy { !$0.label.isEmpty } && Set(commands.map(\.label)).count == commands.count, "每个命令有自己的名称")
         check(commands.allSatisfy { WindowLayoutCommand(slot: $0.slot) == $0 } && Set(commands.map(\.slot)).count == commands.count, "快捷键位置和命令一一对应")
         check(WindowLayoutCommand(slot: 0) == nil && WindowLayoutCommand(slot: 1) == nil && WindowLayoutCommand(slot: WindowLayoutCommand.firstSlot + commands.count) == nil, "菜单栏快捷键的位置不会被当成窗口命令")
@@ -1183,6 +1190,19 @@ struct CoreTests {
         check(decoded?.shortcuts.first(where: { $0.command == .center })?.hotkey == WindowLayoutCommand.leftHalf.defaultHotkey, "保留保存的按键")
         check(decoded?.shortcuts.first(where: { $0.command == .leftHalf })?.hotkey.enabled == false, "补上的命令的默认按键已被占用时先关闭")
         check(decoded?.shortcuts.first(where: { $0.command == .rightHalf })?.hotkey == WindowLayoutCommand.rightHalf.defaultHotkey, "补上的其他命令用默认按键")
+        // Saved by 2.5.0 before this command was added: the fourteen others, one of them on ⌃⌥⌘→.
+        var earlier = WindowShortcutSettings()
+        earlier.enabled = true
+        earlier.shortcuts.removeAll { $0.command == .nextScreen }
+        let earlierData = try? JSONEncoder().encode(earlier)
+        let upgraded = earlierData.flatMap { try? JSONDecoder().decode(WindowShortcutSettings.self, from: $0) }
+        check(upgraded?.shortcuts.count == commands.count && upgraded?.shortcuts.last?.hotkey == WindowLayoutCommand.nextScreen.defaultHotkey && upgraded?.enabled == true,
+              "旧版保存的快捷键读进来时补上“移到下一块屏幕”，用默认按键")
+        earlier.shortcuts[0].hotkey = WindowLayoutCommand.nextScreen.defaultHotkey
+        let takenData = try? JSONEncoder().encode(earlier)
+        let taken = takenData.flatMap { try? JSONDecoder().decode(WindowShortcutSettings.self, from: $0) }
+        check(taken?.shortcuts.first(where: { $0.command == .nextScreen })?.hotkey.enabled == false && taken?.shortcuts.first?.hotkey.enabled == true,
+              "⌃⌥⌘→ 已经给了别的命令时，“移到下一块屏幕”先关闭，不抢走它")
         let encoded = (try? JSONEncoder().encode(settings)) ?? Data()
         check((try? JSONDecoder().decode(UserSettings.self, from: encoded))?.windowShortcuts == settings.windowShortcuts, "保存后读回来不变")
         var object = ((try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any]) ?? [:]
@@ -1194,6 +1214,7 @@ struct CoreTests {
         object["windowShortcuts"] = "坏值"
         check(decodedSettings()?.windowShortcuts == WindowShortcutSettings() && decodedSettings()?.menuBar.toggleHotkey.enabled == true, "这一项损坏时不影响其他设置")
         check(SettingSearchIndex.results("四分屏").first?.title == "启用全局窗口快捷键" && SettingSearchIndex.results("四分屏").first?.section == 1, "设置搜索可以找到全局窗口快捷键")
+        check(SettingSearchIndex.results("下一块屏幕").first?.title == "启用全局窗口快捷键", "设置搜索用“下一块屏幕”也能找到全局窗口快捷键")
     }
     static func verifyThreading() {
         // The key tap decides on its own thread, from what the main thread last published.

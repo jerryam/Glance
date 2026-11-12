@@ -817,8 +817,12 @@ enum WindowAction: Equatable {
     case arrange(WindowArrangement.Kind), restoreFrame
 }
 extension WindowLayoutCommand {
-    /// The same command for the window selected in the panel.
-    var action: WindowAction { kind.map { WindowAction.arrange($0) } ?? .restoreFrame }
+    /// The same command for the window selected in the panel. Moving to the next screen is the panel's own
+    /// command, which says so when it is done.
+    var action: WindowAction {
+        if self == .nextScreen { return .nextScreen }
+        return kind.map { WindowAction.arrange($0) } ?? .restoreFrame
+    }
 }
 enum WindowControl {
     /// 设置 › 通用 › 切换窗口的方式. The window-server path falls back automatically when unavailable.
