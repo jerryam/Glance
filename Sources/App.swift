@@ -40,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var layouts: [LayoutSnapshot] = []
     /// Counts only: how many windows the last restore placed, of how many.
     var layoutResult = ""
+    /// The displays as last seen whole, to tell a change of display from one of the Dock or the menu bar.
+    var knownDisplays: [WindowRect] = []
+    var displayChangeWork: DispatchWorkItem?
+    /// Layouts put back by themselves after the displays changed, since launch.
+    var automaticLayoutRestores = 0
     let layoutsMenu = NSMenu()
     var settingsViewLoaded = false
     /// Reopenings after a crash within the policy's window, and whether they have just gone over its limit.
@@ -245,6 +250,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         })
         supportObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }; self.sleeping = false; self.engine.refreshObservers(); self.updateHotkeyGate(); self.syncActivityTimers()
+        })
+        knownDisplays = Self.displayFrames()
+        supportObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.displaysMayHaveChanged()
         })
         syncActivityTimers()
         if AXIsProcessTrusted() { engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in self?.syncPins(handles) } }
@@ -739,7 +748,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
          "recentOrder": engine.recentOrderCounts,
          "searchHabits": state.habits.count,
-         "layouts": ["saved": layouts.count, "lastRestore": layoutResult],
+         "layouts": ["saved": layouts.count, "lastRestore": layoutResult, "restoreOnDisplayChange": settings.value.advanced.restoreLayoutOnScreenChange,
+                     "automaticRestores": automaticLayoutRestores, "displays": knownDisplays.count],
          "crashRestart": ["armed": CrashRestart.armed, "stopped": crashRestartStopped, "recent": crashRestarts.count],
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,

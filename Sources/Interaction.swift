@@ -568,6 +568,33 @@ enum LayoutSnapshotPolicy {
         if placed >= total { return "已恢复 \(placed) 个窗口。" }
         return "已恢复 \(placed) 个窗口，另外 \(total - placed) 个没有恢复：应用没有打开、窗口已经关闭，或应用不允许调整。"
     }
+
+    // MARK: After the displays change
+
+    /// The system moves windows off a display that went away, and apps put theirs back, for a moment after the
+    /// change. A layout put back before then would be moved again.
+    static let settleDelay: TimeInterval = 2
+    /// The same screens, in any order, each within a point: the system reports fractions of a point now and then.
+    static func sameScreens(_ a: [WindowRect], _ b: [WindowRect]) -> Bool {
+        guard a.count == b.count else { return false }
+        func ordered(_ list: [WindowRect]) -> [WindowRect] {
+            list.sorted { ($0.x, $0.y, $0.width, $0.height) < ($1.x, $1.y, $1.width, $1.height) }
+        }
+        return zip(ordered(a), ordered(b)).allSatisfy { one, other in
+            abs(one.x - other.x) <= 1 && abs(one.y - other.y) <= 1 && abs(one.width - other.width) <= 1 && abs(one.height - other.height) <= 1
+        }
+    }
+    /// The displays themselves changed: one came or went, or one's size or place did. The Dock or the menu bar
+    /// changing what is left of a display is not that, so the displays are compared whole.
+    static func displaysChanged(old: [WindowRect], new: [WindowRect]) -> Bool { !old.isEmpty && !new.isEmpty && !sameScreens(old, new) }
+    /// The layout to put back on the screens there are now: one saved on the same screens, the most recent if more
+    /// than one was. Nil when none was, and then nothing moves.
+    static func automaticChoice(_ layouts: [LayoutSnapshot], screens: [WindowRect]) -> LayoutSnapshot? {
+        layouts.filter { !$0.windows.isEmpty && sameScreens($0.screens, screens) }.max { $0.created < $1.created }
+    }
+    static func automaticSummary(name: String, placed: Int, total: Int) -> String {
+        "显示器有变化，按“\(name)”" + summary(placed: placed, total: total)
+    }
 }
 
 /// The start menu's commands. Anything that ends the session asks first: restart, shut down and log out through the
@@ -1051,6 +1078,7 @@ enum SettingSearchIndex {
         .init(1, "面板中的快捷键 · 点击按键可重新录制", "录制 关闭 退出 最小化 按键 半屏 填满 屏幕 置顶"),
         .init(1, "启用全局窗口快捷键", "半屏 四分屏 三分屏 分屏 居中 还原 窗口位置 全局 下一块屏幕 多显示器 snap tile next display"),
         .init(1, "窗口布局", "布局 快照 保存 恢复 工作区 多显示器 layout snapshot workspace"),
+        .init(1, "接上或拔掉显示器后自动恢复布局", "外接显示器 扩展屏 拔掉 分辨率 排列 自动 布局 display monitor automatic restore"),
         .init(2, "外观", "液态玻璃 liquid glass"), .init(2, "显示样式", "图标 缩略图 列表 style"),
         .init(2, "主题", "浅色 深色 跟随系统 theme"), .init(2, "显示标题", "窗口 应用 名称"),
         .init(2, "过长标题省略位置", "截断 开头 中间 末尾"),

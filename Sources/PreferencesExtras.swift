@@ -390,6 +390,9 @@ struct AdvancedSettings: Codable, Equatable {
     var previewFadeIn = true
     var bindings = PanelBinding.defaults
     var exceptions = AppException.defaults
+    /// After the displays change, put back the saved layout made on displays like the ones there are now. Off
+    /// until asked for: it moves windows without being told to each time.
+    var restoreLayoutOnScreenChange = false
     init() {}
     private enum CodingKeys: String, CodingKey {
         case preferencesRevision, inputMode, searchRanking, searchTypos, searchLearning, searchSkips, shuangpin
@@ -398,7 +401,7 @@ struct AdvancedSettings: Codable, Equatable {
         case focusMethod, commandLineEnabled, dockBadges, restartAfterCrash, browserTabs, searchApps, searchSettingsPages, numberHints
         case titleDisplay, titleCut, panelScreen, followCursor, gesture, gestureProfile, haptics, arrowKeys, vimKeys
         case autoPreview, backgroundPreviews, statusBadges, spaceNumbers, tileButtons, showMenuIcon, menuIcon
-        case showDelay, fadeOut, previewFadeIn, bindings, exceptions
+        case showDelay, fadeOut, previewFadeIn, bindings, exceptions, restoreLayoutOnScreenChange
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -464,6 +467,7 @@ struct AdvancedSettings: Codable, Equatable {
         if revision < 2 && !exceptions.contains(where: { $0.matches(bundle: "com.netease.uuremote") }) {
             exceptions.append(.uuRemote)
         }
+        restoreLayoutOnScreenChange = try c.decodeIfPresent(Bool.self, forKey: .restoreLayoutOnScreenChange) ?? false
     }
 }
 struct WindowRect: Codable, Equatable {

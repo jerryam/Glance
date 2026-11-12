@@ -556,6 +556,8 @@ struct SettingsView: View {
                     }
                 }
                 Button("保存当前布局…") { model.saveLayoutHandler() }
+                SettingsToggle("接上或拔掉显示器后自动恢复布局", isOn: $model.draft.advanced.restoreLayoutOnScreenChange)
+                SettingsNote("显示器接上、拔掉，或者分辨率、排列改变后约两秒，如果有布局是在和现在一样的屏幕上保存的，就恢复它；有几个时用最近保存的那个，没有就什么都不做。只调整 Dock 或菜单栏不算。自动恢复不发出提示音，也不弹出提示。")
                 SettingsNote("恢复时，最小化的窗口和隐藏的应用会重新显示。没有打开的应用不会被打开，已关闭的窗口不会重新出现，全屏窗口不处理，也不恢复窗口的前后顺序。保存时会记下窗口标题，用来区分同一个应用的多个窗口；布局只存在这台 Mac 上，不随设置导出。")
             }
         }

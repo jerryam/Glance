@@ -267,9 +267,14 @@ extension AppDelegate {
             self.settingsModel?.note("已保存“\(layout.name)”：\(layout.windows.count) 个窗口。")
         }
     }
-    func restoreLayout(_ id: UUID) {
-        guard let layout = layouts.first(where: { $0.id == id }) else { NSSound.beep(); return }
-        guard AXIsProcessTrusted() else { showNotice("恢复窗口布局需要先为“一瞥”开启辅助功能权限。"); return }
+    /// Asked for by nobody in particular, so it neither beeps nor shows an alert: the result goes in the settings
+    /// window's note and the diagnostics.
+    func restoreLayout(_ id: UUID, automatic: Bool = false) {
+        guard let layout = layouts.first(where: { $0.id == id }) else { if !automatic { NSSound.beep() }; return }
+        guard AXIsProcessTrusted() else {
+            if !automatic { showNotice("恢复窗口布局需要先为“一瞥”开启辅助功能权限。") }
+            return
+        }
         engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in
             guard let self else { return }
             let screens = WindowControl.screenAreas()
@@ -283,11 +288,42 @@ extension AppDelegate {
             WindowControl.restoreLayout(placements) { [weak self] placed in
                 guard let self else { return }
                 self.layoutResult = "\(placed)/\(layout.windows.count)"
+                if automatic {
+                    self.automaticLayoutRestores += 1
+                    self.settingsModel?.note(LayoutSnapshotPolicy.automaticSummary(name: layout.name, placed: placed, total: layout.windows.count))
+                    return
+                }
                 let summary = LayoutSnapshotPolicy.summary(placed: placed, total: layout.windows.count)
                 // Windows moving say enough when it worked. With none moved, nothing on screen would explain why.
                 if placed == 0 { self.showNotice(summary) } else { self.settingsModel?.note(summary) }
             }
         }
+    }
+
+    /// The displays, whole, in the same coordinates as the screen areas a layout keeps.
+    static func displayFrames() -> [WindowRect] {
+        guard let primaryHeight = NSScreen.screens.first?.frame.height else { return [] }
+        return NSScreen.screens.map { screen in
+            WindowRect(x: Double(screen.frame.minX), y: Double(primaryHeight - screen.frame.maxY), width: Double(screen.frame.width), height: Double(screen.frame.height))
+        }
+    }
+    /// The system says this for the Dock and the menu bar too, and several times for one display: it is looked
+    /// into once things have settled.
+    func displaysMayHaveChanged() {
+        displayChangeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.displaysSettled() }
+        displayChangeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + LayoutSnapshotPolicy.settleDelay, execute: work)
+    }
+    private func displaysSettled() {
+        displayChangeWork = nil
+        let displays = Self.displayFrames()
+        let changed = LayoutSnapshotPolicy.displaysChanged(old: knownDisplays, new: displays)
+        // Kept up to date with the setting off as well, so turning it on later does not act on an old change.
+        if !displays.isEmpty { knownDisplays = displays }
+        guard changed, settings.value.advanced.restoreLayoutOnScreenChange,
+              let layout = LayoutSnapshotPolicy.automaticChoice(layouts, screens: WindowControl.screenAreas()) else { return }
+        restoreLayout(layout.id, automatic: true)
     }
     func renameLayout(_ id: UUID) {
         guard let index = layouts.firstIndex(where: { $0.id == id }) else { return }

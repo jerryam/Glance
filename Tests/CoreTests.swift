@@ -397,6 +397,38 @@ struct CoreTests {
         check(SearchHabits.target(of: result) == "layout:1", "搜索习惯只记布局的编号，不记名称")
         check(SettingSearchIndex.results("窗口布局").first?.section == 1, "设置搜索可以找到窗口布局")
         check(SettingSearchIndex.results("快照").first?.title == "窗口布局", "设置搜索可以用“快照”找到窗口布局")
+
+        // After the displays change.
+        let laptop = WindowRect(x: 0, y: 0, width: 1440, height: 900), monitor = WindowRect(x: 1440, y: 0, width: 2560, height: 1440)
+        check(LayoutSnapshotPolicy.sameScreens([laptop, monitor], [monitor, laptop]), "屏幕顺序不同也算同一组屏幕")
+        check(LayoutSnapshotPolicy.sameScreens([laptop], [WindowRect(x: 0.4, y: -0.5, width: 1440.6, height: 899.2)]), "差一个点以内算同一块屏幕")
+        check(!LayoutSnapshotPolicy.sameScreens([laptop], [WindowRect(x: 0, y: 0, width: 1512, height: 982)]), "分辨率不同不算同一块屏幕")
+        check(!LayoutSnapshotPolicy.sameScreens([laptop], [laptop, monitor]), "屏幕数量不同不算")
+        check(LayoutSnapshotPolicy.displaysChanged(old: [laptop], new: [laptop, monitor]), "接上显示器算变化")
+        check(LayoutSnapshotPolicy.displaysChanged(old: [laptop, monitor], new: [laptop]), "拔掉显示器算变化")
+        check(LayoutSnapshotPolicy.displaysChanged(old: [laptop, monitor], new: [laptop, WindowRect(x: -2560, y: 0, width: 2560, height: 1440)]), "改变屏幕排列算变化")
+        check(!LayoutSnapshotPolicy.displaysChanged(old: [laptop, monitor], new: [monitor, laptop]), "只是换了主屏幕的顺序不算变化")
+        check(!LayoutSnapshotPolicy.displaysChanged(old: [], new: [laptop]) && !LayoutSnapshotPolicy.displaysChanged(old: [laptop], new: []), "读不到屏幕时不动窗口")
+        check(LayoutSnapshotPolicy.settleDelay >= 1 && LayoutSnapshotPolicy.settleDelay <= 5, "等系统和应用先挪完窗口，但不让人等太久")
+        let dockArea = WindowRect(x: 0, y: 25, width: 1440, height: 800), twoArea = WindowRect(x: 1440, y: 25, width: 2560, height: 1415)
+        func snapshot(_ name: String, _ screens: [WindowRect], created: Double, windows: [LayoutSnapshot.Window] = [saved()]) -> LayoutSnapshot {
+            LayoutSnapshot(id: UUID(), name: name, created: created, screens: screens, windows: windows)
+        }
+        let alone = snapshot("笔记本", [dockArea], created: 1), docked = snapshot("办公室", [dockArea, twoArea], created: 2)
+        let newerDocked = snapshot("办公室新", [twoArea, dockArea], created: 3), emptyDocked = snapshot("空的", [dockArea, twoArea], created: 9, windows: [])
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked], screens: [dockArea, twoArea])?.name == "办公室", "接上显示器后用在两块屏幕上保存的布局")
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked], screens: [dockArea])?.name == "笔记本", "拔掉显示器后用只有笔记本屏幕时保存的布局")
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked, newerDocked, emptyDocked], screens: [dockArea, twoArea])?.name == "办公室新", "同样的屏幕有几个布局时用最近保存的，空布局不算")
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked], screens: [WindowRect(x: 0, y: 25, width: 1920, height: 1055)]) == nil, "没有在这组屏幕上保存过布局时什么都不做")
+        check(LayoutSnapshotPolicy.automaticChoice([], screens: [dockArea]) == nil, "没有布局时什么都不做")
+        check(LayoutSnapshotPolicy.automaticSummary(name: "办公室", placed: 2, total: 2) == "显示器有变化，按“办公室”已恢复 2 个窗口。", "自动恢复后说明用了哪个布局")
+        check(!AdvancedSettings().restoreLayoutOnScreenChange, "换显示器后自动恢复布局默认关闭")
+        var autoOn = AdvancedSettings(); autoOn.restoreLayoutOnScreenChange = true
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(autoOn)).restoreLayoutOnScreenChange, "打开自动恢复后保存再读仍是打开的")
+        var withoutKey = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(autoOn)) as! [String: Any]
+        withoutKey.removeValue(forKey: "restoreLayoutOnScreenChange")
+        check(!(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: withoutKey))).restoreLayoutOnScreenChange, "旧设置里没有这一项时是关闭的")
+        check(SettingSearchIndex.results("外接显示器").first?.title == "接上或拔掉显示器后自动恢复布局", "设置搜索可以找到自动恢复布局")
     }
     static func verifyStartMenu() {
         // A sum.
