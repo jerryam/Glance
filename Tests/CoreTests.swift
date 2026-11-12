@@ -1,5 +1,7 @@
 import Foundation
 import ApplicationServices
+import CoreServices
+import JavaScriptCore
 
 @main
 struct CoreTests {
@@ -271,7 +273,1069 @@ struct CoreTests {
         verifyPinsAndRecovery()
         verifyOptimizations()
         verifyThreading()
+        verifyStaleLists()
+        verifyIdleWork()
+        verifySearchCache()
+        verifyWindowShortcuts()
+        verifySettingsEntry()
+        verifyRecentOrder()
+        verifyBrowserScripts()
+        verifySearchHabits()
+        verifyDockPreviewExtras()
+        verifyChineseSearch()
+        verifyCrashRestart()
+        verifyStartMenu()
+        verifyLayoutSnapshots()
+        verifyCopyNotice()
+        verifySearchPrefixes()
         print("\(passed) checks passed")
+    }
+    static func verifySearchPrefixes() {
+        // Reading the mark.
+        func split(_ text: String, enabled: Bool = true) -> String { let (prefix, rest) = SearchPrefix.split(text, enabled: enabled); return "\(prefix?.rawValue ?? "-")|\(rest)" }
+        check(split(">lock") == ">|lock" && split(">  lock") == ">|lock", "> 后面有没有空格都可以")
+        check(split("=1+2") == "=|1+2" && split("/ 报告") == "/|报告" && split("? 天气") == "?|天气", "四个符号各自认得出")
+        check(split(".5+1") == "-|.5+1", "小数点开头不是符号，仍是算式")
+        check(split("lock") == "-|lock" && split("") == "-|" && split("a>b") == "-|a>b", "只认开头的符号")
+        check(split(">lock", enabled: false) == "-|>lock", "关掉以后符号当普通文字")
+        check(split(">") == ">|", "只输入符号时后面是空的")
+        for prefix in SearchPrefix.allCases { check(!prefix.label.isEmpty && !prefix.kinds.isEmpty, "每个符号都有说明：\(prefix.rawValue)") }
+        check(Set(SearchPrefix.allCases.flatMap(\.kinds).map { "\($0)" }).count == SearchPrefix.allCases.flatMap(\.kinds).count, "一类结果只属于一个符号")
+
+        // In the results.
+        func result(_ id: String, title: String, kind: LaunchKind?, pid: Int32 = 0) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: nil, pid: pid, appName: title, bundleID: kind == nil ? "w" : "", title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            d.launcher = kind
+            return d
+        }
+        func list(_ items: [WindowDescriptor], _ text: String, prefixes: Bool = true, grouping: WindowGrouping? = nil, exclusions: String = "") -> [String] {
+            var settings = UserSettings.defaults
+            settings.advanced.searchPrefixes = prefixes
+            settings.exclusions = exclusions
+            var profile = settings.shortcuts[0]
+            if let grouping { profile.grouping = grouping }
+            return WindowSearch.filtered(items, settings: settings, profile: profile, frontPID: nil, displayID: nil, query: text).map(\.id)
+        }
+        let mixed = [result("web", title: "用百度搜索", kind: .web), result("file", title: "wx 记录.txt", kind: .file), result("window", title: "wx 窗口", kind: nil, pid: 5),
+                     result("app", title: "wx 工具", kind: .app), result("command", title: "wx 命令", kind: .command), result("layout", title: "恢复布局：wx", kind: .layout),
+                     result("calc", title: "= 7", kind: .calculation)]
+        check(list(mixed, "> wx") == ["command", "layout"] || list(mixed, "> wx") == ["layout", "command"], "> 只留下系统命令和布局")
+        check(list(mixed, "/wx") == ["file"], "/ 只留下文件")
+        check(list(mixed, "=3+4") == ["calc"], "= 只留下计算结果")
+        check(list(mixed, "? wx") == ["web"], "? 只留下网页搜索")
+        check(!list(mixed, "> wx").contains("window") && !list(mixed, "/wx").contains("window"), "符号后面不出现窗口")
+        let commands = (0..<12).map { result("c\($0)", title: "wx 命令\($0)", kind: .command) }
+        check(list(commands, "wx").count == WindowSearch.launcherLimit, "没有符号时命令仍有数量上限")
+        check(list(commands, "> wx").count == commands.count, "> 后面列出全部匹配的命令，不受上限限制")
+        check(list(commands + mixed, ">").count == commands.count + 2, "只输入 > 列出全部命令和布局")
+        check(list(commands, ">", grouping: .byApp).count == commands.count, "按应用分组时，> 列出的命令也不合成一项")
+        check(list(mixed, "/").isEmpty && list(mixed, "?").isEmpty, "其他符号后面没有内容时什么都不列")
+        check(list(mixed, "").count == 1, "没有输入时仍只列窗口")
+        let plain = list(mixed, "> wx", prefixes: false)
+        check(plain.contains("calc") && plain.contains("web") && !plain.contains("command") && !plain.contains("layout"), "关掉符号后 > 当普通文字搜索，不再只留命令")
+        check(list(mixed, "wx", prefixes: true) == list(mixed, "wx", prefixes: false), "没有符号的搜索不受这个开关影响")
+
+        // Words to leave out, made once instead of for every window.
+        let notes = [result("plain", title: "wx 记事", kind: nil, pid: 6), result("secret", title: "wx 机密 secret", kind: nil, pid: 7)]
+        check(list(notes, "wx") == ["plain", "secret"] || list(notes, "wx") == ["secret", "plain"], "没有排除词时都列出")
+        check(list(notes, "wx", exclusions: "secret") == ["plain"], "排除词仍然有效")
+        check(list(notes, "wx", exclusions: "  SECRET  \n\n   ") == ["plain"], "排除词两端的空格和空行不影响，大小写不敏感")
+        check(list(notes, "", exclusions: "secret") == ["plain"], "排除词对不搜索时的列表也有效")
+
+        // The setting.
+        check(AdvancedSettings().searchPrefixes, "符号筛选默认打开")
+        var off = AdvancedSettings(); off.searchPrefixes = false
+        check(!(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(off))).searchPrefixes, "关掉后保存再读仍是关的")
+        var old = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(off)) as! [String: Any]
+        old.removeValue(forKey: "searchPrefixes")
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: old)).searchPrefixes, "旧设置里没有这一项时是打开的")
+        check(SettingSearchIndex.results("前缀").first?.title == "用开头的符号只看一类结果", "设置搜索可以找到符号筛选")
+    }
+    static func verifyCopyNotice() {
+        check(CopyNotice.text(for: "42") == "已复制 42", "复制算式结果后提示复制了什么")
+        check(CopyNotice.text(for: " 3.5 \n") == "已复制 3.5", "提示里去掉结果两端的空白")
+        check(CopyNotice.text(for: "") == "已复制", "结果为空时提示也不留多余空格")
+        let long = String(repeating: "9", count: 40)
+        let shown = CopyNotice.text(for: long)
+        check(shown.hasSuffix("…") && shown.count == "已复制 ".count + CopyNotice.longest, "很长的结果在提示里截短，以省略号结尾")
+        check(CopyNotice.text(for: String(repeating: "9", count: CopyNotice.longest)).hasSuffix("9"), "刚好到上限的结果完整显示")
+        check(CopyNotice.duration > 0.5 && CopyNotice.duration < 3, "提示停留时间够看清，又不会挡住接下来的操作")
+    }
+    static func verifyLayoutSnapshots() {
+        let place = WindowRect(x: 10, y: 40, width: 300, height: 200)
+        let screen = WindowRect(x: 0, y: 25, width: 1440, height: 875)
+        func window(_ id: String, bundle: String = "a", title: String = "文档", number: UInt32? = nil, minimized: Bool = false, hidden: Bool = false, frame: WindowRect? = WindowRect(x: 10, y: 40, width: 300, height: 200)) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: number, pid: 7, appName: bundle, bundleID: bundle, title: title, minimized: minimized, hidden: hidden, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            d.frame = frame
+            return d
+        }
+        func saved(bundle: String = "a", title: String = "文档", number: UInt32? = nil) -> LayoutSnapshot.Window {
+            LayoutSnapshot.Window(bundleID: bundle, appName: bundle, title: title, windowID: number, frame: place)
+        }
+        func layout(_ name: String, _ windows: [LayoutSnapshot.Window] = []) -> LayoutSnapshot {
+            LayoutSnapshot(id: UUID(), name: name, created: 0, screens: [screen], windows: windows)
+        }
+
+        // What is remembered.
+        var fullScreen = window("full"); fullScreen.fullscreen = true
+        var noWindow = window("none"); noWindow.windowless = true
+        var tab = window("tab"); tab.tabRepresentative = false
+        var own = window("own"); own.settingsWindow = true
+        var row = window("row"); row.launcher = .app
+        let notKept = [fullScreen, noWindow, tab, own, row, window("min", minimized: true), window("hid", hidden: true), window("nof", frame: nil), window("nob", bundle: ""), window("flat", frame: WindowRect(x: 0, y: 0, width: 0, height: 0))]
+        for item in notKept { check(!LayoutSnapshotPolicy.capturable(item), "不保存：\(item.id)") }
+        let captured = LayoutSnapshotPolicy.capture(name: "  工作  ", windows: notKept + [window("kept", bundle: "b", title: "表格", number: 11)], screens: [screen], now: 5)
+        check(captured.name == "工作", "名称去掉首尾空格")
+        check(captured.windows == [saved(bundle: "b", title: "表格", number: 11)], "只保存屏幕上的窗口，并记下位置和标题")
+        check(captured.screens == [screen] && captured.created == 5, "记下当时的屏幕")
+        check(LayoutSnapshotPolicy.capture(name: "x", windows: (0..<500).map { window("w\($0)") }, screens: [], now: 0).windows.count == LayoutSnapshotPolicy.windowLimit, "窗口数量有上限")
+
+        // Names and the list.
+        check(LayoutSnapshotPolicy.suggestedName(among: []) == "布局 1", "第一个布局的名称")
+        check(LayoutSnapshotPolicy.suggestedName(among: [layout("布局 1"), layout("布局 3")]) == "布局 2", "建议的名称不重复")
+        check(LayoutSnapshotPolicy.cleaned(name: " a\n") == "a", "名称去掉换行")
+        check(LayoutSnapshotPolicy.cleaned(name: String(repeating: "长", count: 100)).count == LayoutSnapshotPolicy.longestName, "名称长度有上限")
+        let first = layout("工作"), second = layout("回家")
+        let added = LayoutSnapshotPolicy.adding(second, to: [first])
+        check(added == [first, second], "新名称加在后面")
+        let again = layout("工作", [saved()])
+        check(LayoutSnapshotPolicy.adding(again, to: [first, second]) == [again, second], "同名的布局被替换")
+        let full = (0..<LayoutSnapshotPolicy.limit).map { layout("布局\($0)") }
+        check(LayoutSnapshotPolicy.adding(layout("再来一个"), to: full) == nil, "布局满了时不会悄悄丢掉旧的")
+        check(LayoutSnapshotPolicy.adding(layout("布局0"), to: full)?.count == LayoutSnapshotPolicy.limit, "布局满了也可以替换同名的")
+        check(LayoutSnapshotPolicy.decoded(try! JSONEncoder().encode([again, second])) == [again, second], "保存后读取不变")
+        check(LayoutSnapshotPolicy.decoded(nil).isEmpty, "没有保存过时是空的")
+        check(LayoutSnapshotPolicy.decoded(Data("不是 JSON".utf8)).isEmpty, "数据损坏时是空的")
+
+        // Finding the windows again.
+        let matched = LayoutSnapshotPolicy.match([saved(title: "文档", number: 11), saved(title: "表格", number: 12), saved(title: "旧", number: 13), saved(bundle: "c", title: "x", number: 14)],
+                                                 live: [window("renamed", title: "改了名", number: 12), window("sameTitle", title: "文档", number: 99), window("other", title: "别的", number: 98), window("wrongApp", bundle: "b", title: "x", number: 14)])
+        check(matched == [0: "sameTitle", 1: "renamed", 2: "other"], "先按窗口编号，再按标题，最后按同一个应用")
+        check(LayoutSnapshotPolicy.match([saved(title: "1"), saved(title: "2")], live: [window("only")]).count == 1, "一个窗口不会被用两次")
+        check(LayoutSnapshotPolicy.match([saved(number: 5)], live: [window("x", bundle: "b", number: 5)]).isEmpty, "其他应用的窗口不算，即使编号相同")
+        check(LayoutSnapshotPolicy.match([saved(title: "T"), saved(title: "U", number: 21)], live: [window("x", title: "T", number: 21)]) == [1: "x"], "编号相同的优先于标题相同的")
+        check(LayoutSnapshotPolicy.match([saved()], live: [fullScreen]).isEmpty, "不移动全屏窗口")
+        check(LayoutSnapshotPolicy.match([saved()], live: [tab]).isEmpty, "不单独移动标签页")
+        check(LayoutSnapshotPolicy.match([saved()], live: [noWindow]).isEmpty, "没有窗口的应用不算")
+        check(LayoutSnapshotPolicy.match([saved()], live: [own]).isEmpty, "不移动一瞥自己的设置窗口")
+        check(LayoutSnapshotPolicy.match([saved()], live: [row]).isEmpty, "搜索结果不算窗口")
+        check(LayoutSnapshotPolicy.match([saved()], live: [window("m", minimized: true)]) == [0: "m"], "最小化的窗口可以恢复")
+        check(LayoutSnapshotPolicy.match([saved()], live: [window("h", hidden: true)]) == [0: "h"], "隐藏的应用的窗口可以恢复")
+        check(LayoutSnapshotPolicy.match([], live: [window("x")]).isEmpty, "空布局不移动任何窗口")
+
+        // Where they go.
+        func target(_ frame: WindowRect, _ old: [WindowRect], _ new: [WindowRect]) -> WindowRect { LayoutSnapshotPolicy.target(of: frame, savedScreens: old, screens: new) }
+        let partlyOff = WindowRect(x: -100, y: 100, width: 800, height: 600)
+        check(target(partlyOff, [screen], [screen]) == partlyOff, "屏幕没变时位置完全不变")
+        check(target(place, [], [screen]) == place, "没有记下屏幕时不换算")
+        check(target(place, [screen], []) == place, "读不到屏幕时不换算")
+        let external = WindowRect(x: 1440, y: 25, width: 1920, height: 1055), movedExternal = WindowRect(x: -1920, y: 25, width: 1920, height: 1055)
+        let onExternal = WindowRect(x: 1500, y: 100, width: 800, height: 600)
+        check(target(onExternal, [screen, external], [screen, external]) == onExternal, "两块屏幕都没变时位置不变")
+        check(target(onExternal, [screen, external], [screen, movedExternal]) == WindowRect(x: -1860, y: 100, width: 800, height: 600), "外接屏换了位置时窗口跟着它")
+        let leftHalf = WindowRect(x: 0, y: 25, width: 720, height: 875), bigger = WindowRect(x: 0, y: 25, width: 2880, height: 1750)
+        check(target(leftHalf, [screen], [bigger]) == WindowRect(x: 0, y: 25, width: 1440, height: 1750), "换了大小的屏幕上，左半屏还是左半屏")
+        let onlyLaptop = target(onExternal, [screen, external], [screen])
+        check(onlyLaptop.x >= screen.x && onlyLaptop.x + onlyLaptop.width <= screen.x + screen.width, "外接屏拔掉后窗口横向留在现有屏幕内")
+        check(onlyLaptop.y >= screen.y && onlyLaptop.y + onlyLaptop.height <= screen.y + screen.height, "外接屏拔掉后窗口纵向留在现有屏幕内")
+        let huge = target(WindowRect(x: 0, y: 25, width: 5000, height: 5000), [screen], [WindowRect(x: 0, y: 25, width: 1000, height: 600)])
+        check(huge.width == 1000 && huge.height == 600, "窗口不会大过屏幕")
+        check(target(place, [WindowRect(x: 0, y: 0, width: 0, height: 0)], [screen]) == place, "保存的屏幕数据不合理时不换算")
+
+        // Saying what happened.
+        check(LayoutSnapshotPolicy.summary(placed: 3, total: 3) == "已恢复 3 个窗口。", "全部恢复")
+        check(LayoutSnapshotPolicy.summary(placed: 2, total: 3).contains("另外 1 个"), "说明有几个没有恢复")
+        check(LayoutSnapshotPolicy.summary(placed: 0, total: 2).contains("另外 2 个"), "一个也没有恢复")
+
+        // In the search.
+        check(LaunchKind.layout.action == "执行" && LaunchKind.command.action == "执行", "布局和命令的回车动作")
+        check(LaunchKind.layout.place == LaunchKind.command.place, "布局和系统命令排在一起")
+        check(LayoutSnapshotPolicy.listedInSearch(commands: false, saved: 1) && LayoutSnapshotPolicy.listedInSearch(commands: true, saved: 0), "有保存的布局时总能搜到，不看系统命令的开关")
+        check(!LayoutSnapshotPolicy.listedInSearch(commands: false, saved: 0), "没有布局、也关了系统命令时，搜索里不出现布局")
+        var result = WindowDescriptor(id: "layout:1", windowID: nil, pid: 0, appName: "Restore Window Layout", bundleID: "", title: "恢复布局：工作", minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        result.launcher = .layout
+        result.subtitle = LayoutSnapshotPolicy.keywords
+        for query in ["工作", "布局", "buju", "layout", "snapshot", "快照"] { check(WindowSearch.matches(result, query: query), "搜索可以找到布局：\(query)") }
+        check(SearchHabits.target(of: result) == "layout:1", "搜索习惯只记布局的编号，不记名称")
+        check(SettingSearchIndex.results("窗口布局").first?.section == 1, "设置搜索可以找到窗口布局")
+        check(SettingSearchIndex.results("快照").first?.title == "窗口布局", "设置搜索可以用“快照”找到窗口布局")
+
+        // After the displays change.
+        let laptop = WindowRect(x: 0, y: 0, width: 1440, height: 900), monitor = WindowRect(x: 1440, y: 0, width: 2560, height: 1440)
+        check(LayoutSnapshotPolicy.sameScreens([laptop, monitor], [monitor, laptop]), "屏幕顺序不同也算同一组屏幕")
+        check(LayoutSnapshotPolicy.sameScreens([laptop], [WindowRect(x: 0.4, y: -0.5, width: 1440.6, height: 899.2)]), "差一个点以内算同一块屏幕")
+        check(!LayoutSnapshotPolicy.sameScreens([laptop], [WindowRect(x: 0, y: 0, width: 1512, height: 982)]), "分辨率不同不算同一块屏幕")
+        check(!LayoutSnapshotPolicy.sameScreens([laptop], [laptop, monitor]), "屏幕数量不同不算")
+        check(LayoutSnapshotPolicy.displaysChanged(old: [laptop], new: [laptop, monitor]), "接上显示器算变化")
+        check(LayoutSnapshotPolicy.displaysChanged(old: [laptop, monitor], new: [laptop]), "拔掉显示器算变化")
+        check(LayoutSnapshotPolicy.displaysChanged(old: [laptop, monitor], new: [laptop, WindowRect(x: -2560, y: 0, width: 2560, height: 1440)]), "改变屏幕排列算变化")
+        check(!LayoutSnapshotPolicy.displaysChanged(old: [laptop, monitor], new: [monitor, laptop]), "只是换了主屏幕的顺序不算变化")
+        check(!LayoutSnapshotPolicy.displaysChanged(old: [], new: [laptop]) && !LayoutSnapshotPolicy.displaysChanged(old: [laptop], new: []), "读不到屏幕时不动窗口")
+        check(LayoutSnapshotPolicy.settleDelay >= 1 && LayoutSnapshotPolicy.settleDelay <= 5, "等系统和应用先挪完窗口，但不让人等太久")
+        let dockArea = WindowRect(x: 0, y: 25, width: 1440, height: 800), twoArea = WindowRect(x: 1440, y: 25, width: 2560, height: 1415)
+        func snapshot(_ name: String, _ screens: [WindowRect], created: Double, windows: [LayoutSnapshot.Window] = [saved()]) -> LayoutSnapshot {
+            LayoutSnapshot(id: UUID(), name: name, created: created, screens: screens, windows: windows)
+        }
+        let alone = snapshot("笔记本", [dockArea], created: 1), docked = snapshot("办公室", [dockArea, twoArea], created: 2)
+        let newerDocked = snapshot("办公室新", [twoArea, dockArea], created: 3), emptyDocked = snapshot("空的", [dockArea, twoArea], created: 9, windows: [])
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked], screens: [dockArea, twoArea])?.name == "办公室", "接上显示器后用在两块屏幕上保存的布局")
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked], screens: [dockArea])?.name == "笔记本", "拔掉显示器后用只有笔记本屏幕时保存的布局")
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked, newerDocked, emptyDocked], screens: [dockArea, twoArea])?.name == "办公室新", "同样的屏幕有几个布局时用最近保存的，空布局不算")
+        check(LayoutSnapshotPolicy.automaticChoice([alone, docked], screens: [WindowRect(x: 0, y: 25, width: 1920, height: 1055)]) == nil, "没有在这组屏幕上保存过布局时什么都不做")
+        check(LayoutSnapshotPolicy.automaticChoice([], screens: [dockArea]) == nil, "没有布局时什么都不做")
+        check(LayoutSnapshotPolicy.automaticSummary(name: "办公室", placed: 2, total: 2) == "显示器有变化，按“办公室”已恢复 2 个窗口。", "自动恢复后说明用了哪个布局")
+        check(!AdvancedSettings().restoreLayoutOnScreenChange, "换显示器后自动恢复布局默认关闭")
+        var autoOn = AdvancedSettings(); autoOn.restoreLayoutOnScreenChange = true
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(autoOn)).restoreLayoutOnScreenChange, "打开自动恢复后保存再读仍是打开的")
+        var withoutKey = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(autoOn)) as! [String: Any]
+        withoutKey.removeValue(forKey: "restoreLayoutOnScreenChange")
+        check(!(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: withoutKey))).restoreLayoutOnScreenChange, "旧设置里没有这一项时是关闭的")
+        check(SettingSearchIndex.results("外接显示器").first?.title == "接上或拔掉显示器后自动恢复布局", "设置搜索可以找到自动恢复布局")
+    }
+    static func verifyStartMenu() {
+        // A sum.
+        func sum(_ text: String) -> String? { Calculator.evaluate(text).map(Calculator.format) }
+        let sums: [(String, String)] = [
+            ("1+2*3", "7"), ("(1+2)*3", "9"), ("10/4", "2.5"), ("7-10", "-3"),
+            ("2^10", "1024"), ("2**10", "1024"), ("2^3^2", "512"), ("-2^2", "-4"), ("2^-1", "0.5"), ("2*3**2", "18"),
+            ("10%3", "1"), ("10 % 3", "1"), ("50%", "0.5"), ("50%+1", "1.5"), ("200*15%", "30"), ("200+50%*2", "201"),
+            ("sqrt(16)+1", "5"), ("abs(-3)+1", "4"), ("round(2.6)", "3"), ("log(100)", "2"), ("floor(2.9)*2", "4"), ("ceil(2.1)", "3"),
+            ("1 + 2", "3"), ("３＋４", "7"), ("3×4", "12"), ("8÷2", "4"), ("（1+2）*2", "6"), ("3x4", "12"), ("3X4", "12"), ("5−2", "3"), ("1.5+.5", "2"),
+            ("0.1+0.2", "0.3"), ("1/3", "0.333333333333"), ("10^20", "1e+20"), ("1-1", "0"), ("-1+1", "0"), ("0*-1", "0"),
+        ]
+        for (text, answer) in sums { check(sum(text) == answer, "算式 \(text) = \(answer)") }
+        check(sum("pi*2")?.hasPrefix("6.28318530") == true, "圆周率")
+        check(sum("π*2")?.hasPrefix("6.28318530") == true, "圆周率可以写成 π")
+        let notSums = ["123", "-5", "(5)", "pi", "abc", "", " ", "1+", "+", "*2", "(1+2", "1+2)", "2(3)", "2pi", "1 2", "sqrt", "sqrt(", "sqrt 4", "nosuch(1)", "x", "3x", "%",
+                       "2024-01-01", "1.2.3", "007+1", "7-zip", "v1.2", "a+b", "微信+1", "一+一", "1/0", "0/0", "sqrt(-1)", "2^99999", "5%0"]
+        for text in notSums { check(sum(text) == nil, "不显示计算结果：\(text)") }
+        check(sum("0x10") == nil && sum("0X1f") == nil && sum("1+0x10") == nil, "十六进制的写法不当作算式")
+        check(sum("10x0") == "0" && sum("0 x 5") == "0", "0 仍然可以用 x 相乘")
+        let deep = String(repeating: "(", count: 90) + "1+1" + String(repeating: ")", count: 90)
+        check(sum(deep) == nil, "括号嵌套太深时不计算，也不会崩溃")
+        check(sum(String(repeating: "-", count: 150) + "1+1") == nil, "负号太多时不计算，也不会崩溃")
+        check(sum(String(repeating: "1+", count: 400) + "1") == nil, "太长时不计算")
+        check(sum(String(repeating: "(", count: 10) + "1+1" + String(repeating: ")", count: 10)) == "2", "普通的嵌套可以计算")
+
+        // A web search and a web address.
+        check(WebSearchEngine.baidu.url(for: "微信")?.absoluteString == "https://www.baidu.com/s?wd=%E5%BE%AE%E4%BF%A1", "百度搜索的地址")
+        check(WebSearchEngine.bing.url(for: "a b")?.absoluteString == "https://www.bing.com/search?q=a%20b", "必应搜索的地址")
+        check(WebSearchEngine.google.url(for: "c++")?.absoluteString == "https://www.google.com/search?q=c%2B%2B", "加号不会变成空格")
+        check(WebSearchEngine.duckDuckGo.url(for: "a&b=c#d")?.absoluteString == "https://duckduckgo.com/?q=a%26b%3Dc%23d", "特殊字符不会改变地址的结构")
+        check(WebSearchEngine.allCases.allSatisfy { $0.url(for: "x")?.scheme == "https" && !$0.label.isEmpty }, "每个搜索引擎都用 https")
+        let addresses: [(String, String)] = [
+            ("github.com", "https://github.com"), (" docs.python.org/3/ ", "https://docs.python.org/3/"), ("www.example.xyz", "https://www.example.xyz"), ("http://x.org/a?b=1", "http://x.org/a?b=1"),
+        ]
+        for (text, address) in addresses { check(WebAddress.url(from: text)?.absoluteString == address, "网址：\(text)") }
+        check(WebAddress.url(from: "HTTPS://x.dev")?.host == "x.dev", "协议的大小写不影响判断")
+        for text in ["javascript:alert(1)", "file:///etc/passwd", "ftp://x.org", "mailto:a@b.com", "x-apple.systempreferences:com", "chrome://settings", "localhost:8080", "http://", "https:// x.org"] {
+            check(WebAddress.url(from: text) == nil, "只打开 http 和 https：\(text)")
+        }
+        for text in ["report.pdf", "main.swift", "com.apple.mail", "hello world", "微信", "1.5", "a..com", ".com", "com", "a@b.com", ""] {
+            check(WebAddress.url(from: text) == nil, "不算网址：\(text)")
+        }
+
+        // Commands.
+        let commands = SystemCommand.allCases
+        check(Set(commands.map(\.title)).count == commands.count, "系统命令的名称不重复")
+        check(commands.allSatisfy { !$0.english.isEmpty && !$0.keywords.isEmpty && !$0.symbol.isEmpty }, "每个系统命令都有英文名、搜索词和图标")
+        check(commands.allSatisfy { $0.program.path.hasPrefix("/usr/bin/") }, "系统命令用系统自带的绝对路径运行")
+        check(commands.allSatisfy { $0.asksFirst == $0.title.hasSuffix("…") }, "会先确认的命令名称都带省略号")
+        for command in [SystemCommand.restart, .shutDown, .logOut, .emptyTrash] { check(command.asksFirst, "结束会话或删除文件前先确认：\(command.title)") }
+        check(SystemCommand.restart.program.arguments.last?.contains("aevtrrst") == true, "重新启动用系统的确认对话框")
+        check(SystemCommand.shutDown.program.arguments.last?.contains("aevtrsdn") == true, "关机用系统的确认对话框")
+        check(SystemCommand.logOut.program.arguments.last?.contains("aevtlogo") == true, "退出登录用系统的确认对话框")
+        // The codes in those scripts against the SDK's own names: a wrong one could restart the Mac without asking.
+        func code<T: BinaryInteger>(_ value: T) -> String {
+            let number = UInt32(truncatingIfNeeded: value)
+            let bytes: [UInt8] = [UInt8(number >> 24 & 0xFF), UInt8(number >> 16 & 0xFF), UInt8(number >> 8 & 0xFF), UInt8(number & 0xFF)]
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        check(code(kCoreEventClass) == "aevt", "SDK：核心事件类是 aevt")
+        check(code(kAEShowRestartDialog) == "rrst", "SDK：rrst 是显示重新启动对话框")
+        check(code(kAEShowShutdownDialog) == "rsdn", "SDK：rsdn 是显示关机对话框")
+        check(code(kAELogOut) == "logo", "SDK：logo 是退出登录")
+        check(code(kAERestart) == "rest", "SDK：rest 是直接重新启动")
+        check(code(kAEShutDown) == "shut", "SDK：shut 是直接关机")
+        check(code(kAEReallyLogOut) == "rlgo", "SDK：rlgo 是直接退出登录")
+        for event in ["aevtrest", "aevtshut", "aevtrlgo"] {
+            check(!commands.contains { $0.program.arguments.contains { $0.contains(event) } }, "不使用不经确认就执行的事件：\(event)")
+        }
+
+        // Files.
+        let home = "/Users/me"
+        check(FileSearchPolicy.tokens("报告 2026") == ["报告", "2026"], "按空格分开查找")
+        for text in ["a", "", "  ", "* ?", "ab", "a b", "12"] { check(FileSearchPolicy.tokens(text).isEmpty, "字数不够时不查文件：\(text)") }
+        check(FileSearchPolicy.tokens("abc") == ["abc"] && FileSearchPolicy.tokens("报告") == ["报告"] && FileSearchPolicy.tokens("a报") == ["a报"], "英文和数字三个字符起查，有汉字时两个字起查")
+        check(FileSearchPolicy.tokens("a*b?c") == ["abc"], "通配符不进入查询")
+        check(FileSearchPolicy.tokens("\"x'y\\z") == ["xyz"], "引号和反斜杠不进入查询")
+        check(FileSearchPolicy.tokens("a b c d e f g").count == 5, "关键词数量有上限")
+        for path in ["/Users/me/Documents/报告.pdf", "/Users/me/a.txt"] { check(FileSearchPolicy.keeps(path: path, home: home), "主目录下的文件：\(path)") }
+        for path in ["/Users/me/Library/Caches/a.txt", "/Users/me/.ssh/config", "/Users/me/x/.git/a", "/Users/me/Applications/A.app", "/Users/me/A.app/Contents/x.txt", "/Users/other/a.txt", "/Users/melissa/a.txt", "/tmp/a.txt"] {
+            check(!FileSearchPolicy.keeps(path: path, home: home), "不列这个文件：\(path)")
+        }
+        let buried = (0..<300).map { "/Users/me/Library/Application Support/x/config\($0).plist" } + ["/Users/me/Documents/config.yaml", "/Users/me/x/.git/config", "/Users/me/Desktop/config.txt"]
+        var read = 0
+        let dug = FileSearchPolicy.pick(from: buried.count, home: home) { index in read += 1; return buried[index] }
+        check(dug == ["/Users/me/Documents/config.yaml", "/Users/me/Desktop/config.txt"], "前面全是 Library 里的文件时，后面的文稿仍然列得出来")
+        let plenty = (0..<50).map { "/Users/me/Documents/\($0).txt" }
+        read = 0
+        let enough = FileSearchPolicy.pick(from: plenty.count, home: home) { index in read += 1; return plenty[index] }
+        check(enough.count == FileSearchPolicy.limit && read == FileSearchPolicy.limit, "文件数量有上限，够数以后不再往下读")
+        read = 0
+        let nothing = FileSearchPolicy.pick(from: 100_000, home: home) { _ in read += 1; return nil }
+        check(nothing.isEmpty && read == FileSearchPolicy.looked, "匹配再多，也只看前面有限的几条")
+        let spotlight = ["/Users/me/a.txt", "/Users/me/Documents/b.txt", "/Users/me/Documents/c.txt"]
+        let merged = FileSearchPolicy.pick(from: spotlight.count, home: home, first: ["/Users/me/a.txt"]) { index in spotlight[index] }
+        check(merged == spotlight, "主目录里直接放着的文件排在前面，不重复列出")
+        check(FileSearchPolicy.folders(["Documents", "Library", ".Trash", "Desktop", "Tool.app", "Projects"]) == ["Desktop", "Documents", "Projects"], "只查主目录下看得见的文件夹，不查 Library")
+        check(FileSearchPolicy.loose(["报告 2026.pdf", "Report.TXT", ".report", "notes.md"], tokens: ["report"]) == ["Report.TXT"], "主目录里直接放着的文件按名称查，不分大小写，不列隐藏文件")
+        check(FileSearchPolicy.loose(["报告 2026.pdf", "报告.txt"], tokens: ["报告", "2026"]) == ["报告 2026.pdf"], "每个词都要在名称里")
+        check(FileSearchPolicy.place(of: "/Users/me/Documents/a.txt", home: home) == "~/Documents", "子文件夹里的文件")
+        check(FileSearchPolicy.place(of: "/Users/me/a.txt", home: home) == "~", "主目录里的文件")
+        check(FileSearchPolicy.place(of: "/tmp/a.txt", home: home) == "/tmp", "其他位置的文件")
+        // Programs and scripts are shown in Finder instead of being run.
+        let runs = FileSearchPolicy.runsWhenOpened
+        for name in ["backup.command", "Deploy.SH", "tool.py", "app.jar", "login.terminal"] { check(runs(name, []), "按名称认出打开就会运行的文件：\(name)") }
+        check(runs("mytool", ["public.unix-executable", "public.executable", "public.data"]), "没有扩展名的可执行文件按类型认出")
+        check(runs("setup", ["public.shell-script", "public.script", "public.source-code"]), "没有扩展名的脚本按类型认出")
+        check(!runs("报告.pdf", ["com.adobe.pdf", "public.data"]) && !runs("notes.txt", []) && !runs("command", []), "文档照常打开")
+        check(!runs("index.js", ["com.netscape.javascript-source", "public.source-code"]) && !runs("main.swift", ["public.swift-source"]), "其他源代码照常打开")
+        var program = WindowDescriptor(id: "file:/Users/me/run.command", windowID: nil, pid: 0, appName: "~", bundleID: "", title: "run.command",
+                                       minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        program.launcher = .file
+        check(program.launchAction == "打开" && program.launchHint == LaunchKind.file.hint, "普通文件回车打开")
+        program.revealOnly = true
+        check(program.launchAction == "在访达中显示" && program.launchHint?.contains("访达") == true, "程序和脚本回车在访达中显示")
+        check(program.launcher == .file && program.searchOnly, "它仍然是一条文件结果")
+
+        // Together in the results.
+        func result(_ id: String, title: String, kind: LaunchKind?, bundle: String = "", pid: Int32 = 0) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: nil, pid: pid, appName: title, bundleID: bundle, title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            d.launcher = kind
+            return d
+        }
+        func list(_ items: [WindowDescriptor], _ text: String) -> [String] {
+            let settings = UserSettings.defaults
+            return WindowSearch.filtered(items, settings: settings, profile: settings.shortcuts[0], frontPID: nil, displayID: nil, query: text).map(\.id)
+        }
+        let mixed = [result("web", title: "用百度搜索", kind: .web), result("file", title: "wx 记录.txt", kind: .file), result("window", title: "wx 窗口", kind: nil, bundle: "w", pid: 5),
+                     result("app", title: "wx 工具", kind: .app, bundle: "t"), result("command", title: "wx 命令", kind: .command, bundle: "lockScreen"), result("calc", title: "= 7", kind: .calculation)]
+        check(list(mixed, "wx") == ["calc", "window", "app", "command", "file", "web"], "算式最前，文件在窗口和应用之后，网页搜索最后")
+        check(list(mixed, "") == ["window"], "没有输入时只列窗口")
+        check(list([result("web", title: "用百度搜索", kind: .web)], "完全不相关") == ["web"], "网页搜索不要求匹配输入")
+        check(list([result("file", title: "报告.txt", kind: .file)], "完全不相关").isEmpty, "输入变化后，不匹配的旧文件结果不再显示")
+        let many = (0..<20).map { result("a\($0)", title: "wx\($0)", kind: .app, bundle: "a\($0)") } + (0..<3).map { result("f\($0)", title: "wx\($0).txt", kind: .file) }
+            + [result("web", title: "搜索", kind: .web), result("calc", title: "= 1", kind: .calculation)]
+        let listed = list(many, "wx")
+        check(listed.filter { $0.hasPrefix("a") }.count == WindowSearch.launcherLimit, "应用的数量仍有上限")
+        check(listed.filter { $0.hasPrefix("f") }.count == 3, "文件不占应用的名额")
+        check(listed.contains("web") && listed.first == "calc", "算式和网页搜索不占应用的名额")
+        for kind in [LaunchKind.file, .calculation, .web] { check(SearchHabits.target(of: result("x", title: "x", kind: kind)) == nil, "不进入搜索习惯：\(kind)") }
+        check(SearchHabits.target(of: result("launch:command:sleep", title: "睡眠", kind: .command, bundle: "sleep")) == "launch:command:sleep", "系统命令可以进入搜索习惯")
+        var command = result("c", title: "锁定屏幕", kind: .command, bundle: "lockScreen")
+        command.subtitle = SystemCommand.lockScreen.keywords
+        for query in ["锁屏", "suoping", "suodingpingmu", "sdpm"] { check(WindowSearch.matches(command, query: query), "系统命令可以用别名和拼音找到：\(query)") }
+        for kind in LaunchKind.allCases { check(!kind.label.isEmpty && !kind.symbol.isEmpty && !kind.hint.isEmpty && !kind.action.isEmpty, "每种结果都有说明：\(kind)") }
+        check(LaunchKind.calculation.action == "复制" && LaunchKind.web.action == "打开", "回车的动作")
+        check(LaunchKind.web.madeFromQuery && LaunchKind.calculation.madeFromQuery && !LaunchKind.file.madeFromQuery, "只有算式和网页搜索不需要匹配输入")
+
+        // Settings.
+        let standard = AdvancedSettings()
+        check(standard.searchCommands && standard.searchCalculator && !standard.searchFiles && !standard.searchWeb, "系统命令和算式默认开启，文件搜索和网页搜索默认关闭")
+        check(standard.webEngine == .baidu, "默认的搜索引擎")
+        var stored = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(standard)) as! [String: Any]
+        for key in ["searchCommands", "searchFiles", "searchCalculator", "searchWeb", "webEngine"] { stored.removeValue(forKey: key) }
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: stored)) == standard, "旧设置没有这几项时采用默认值")
+        var chosen = standard
+        chosen.searchWeb = true; chosen.searchFiles = true; chosen.webEngine = .google
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(chosen)) == chosen, "开始菜单的设置保存后不变")
+        var later = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(chosen)) as! [String: Any]
+        later["webEngine"] = "以后才有的搜索引擎"; later["shuangpin"] = "以后才有的双拼"
+        let tolerant = try? JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: later))
+        check(tolerant?.webEngine == .baidu && tolerant?.shuangpin == .off && tolerant?.searchWeb == true && tolerant?.searchFiles == true, "不认识的搜索引擎或双拼方案回到默认值，其他设置保留")
+        var testBuild = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(chosen)) as! [String: Any]
+        testBuild["preferencesRevision"] = 2
+        let moved = try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: testBuild))
+        check(!moved.searchFiles && !moved.searchWeb && moved.preferencesRevision == 3, "2.5.0 测试版存下的文件搜索和网页搜索改为关闭")
+        check(moved.webEngine == .google && moved.searchCommands && moved.searchCalculator, "其他开始菜单的设置保留")
+        for word in ["计算器", "锁屏", "网页搜索", "聚焦", "必应"] { check(SettingSearchIndex.results(word).first?.section == 1, "设置搜索可以找到新选项：\(word)") }
+        check(SettingSearchIndex.results("诊断").first?.title == "复制诊断信息" && SettingSearchIndex.results("diagnostics").contains { $0.title == "复制诊断信息" }, "设置搜索可以找到复制诊断信息")
+    }
+    static func verifyCrashRestart() {
+        let p = CrashRestartPolicy.self
+        // The command, run by a real shell with a harmless program in place of `open`.
+        func run(_ arguments: [String]) -> String {
+            let process = Process(), pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: arguments[0])
+            process.arguments = Array(arguments.dropFirst())
+            process.standardOutput = pipe
+            try! process.run()
+            process.waitUntilExit()
+            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        }
+        for path in ["/Applications/Glance.app", "/tmp/带 空格 的/Glance.app", "/tmp/it's \"odd\" $(touch x); `y`.app"] {
+            let output = run(["/bin/sh", "-c", p.script(delay: 0, opener: "/usr/bin/printf '%s|'"), path])
+            check(output == "-n|\(path)|--args|--restarted-after-crash|", "重新打开的命令原样传递路径：\(path)")
+            let command = p.command(appPath: path)
+            check(command.count == 4 && command[0] == "/bin/sh" && command[1] == "-c" && command[3] == path && !command[2].contains(path), "路径只作为参数，不进入脚本")
+        }
+        check(p.script().hasPrefix("sleep 2;") && p.script().contains("exec /usr/bin/open -n"), "等旧进程退出后再打开一个新进程")
+
+        // Stopping after repeated crashes.
+        check(p.allowsAnother([], now: 1000), "没有崩溃记录时可以重新打开")
+        let twice = p.recording(restartAt: 1100, history: p.recording(restartAt: 1000, history: []))
+        check(twice == [1000, 1100] && p.allowsAnother(twice, now: 1100), "重新打开两次后还可以再开一次")
+        let thrice = p.recording(restartAt: 1200, history: twice)
+        check(thrice.count == 3 && !p.allowsAnother(thrice, now: 1200), "重新打开三次后不再重开")
+        check(p.allowsAnother(thrice, now: 1000 + p.window + 201), "过了时间窗口又可以重新打开")
+        check(p.recording(restartAt: 2000, history: [1000, 1500, 1900]) == [1500, 1900, 2000], "记录时丢弃窗口外的旧记录")
+        check(p.recent([5000, 900], now: 1000) == [900], "时钟往回调时，未来时间的记录不算数")
+        check(p.recent([400, 401], now: 1000) == [401], "正好满一个时间窗口的记录不算数")
+
+        // Which copies are reopened.
+        check(p.applies(arguments: ["/A/Glance.app/Contents/MacOS/Glance"], bundlePath: "/A/Glance.app"), "普通启动会重新打开")
+        check(p.applies(arguments: ["x", p.argument], bundlePath: "/A/Glance.app") && p.applies(arguments: ["x", "--settings"], bundlePath: "/A/Glance.app"), "崩溃后重开和打开设置也算普通启动")
+        check(p.applies(arguments: ["x", "-psn_0_123"], bundlePath: "/A/Glance.app"), "系统传入的单横线参数不影响判断")
+        check(!p.applies(arguments: ["x", "--dock-preview-selftest", "/tmp"], bundlePath: "/A/Glance.app") && !p.applies(arguments: ["x", "--demo"], bundlePath: "/A/Glance.app"), "测试启动不重新打开")
+        check(!p.applies(arguments: ["x"], bundlePath: "/usr/local/bin"), "不在应用包里运行时不重新打开")
+
+        // Settings.
+        check(AdvancedSettings().restartAfterCrash, "默认开启自动重新打开")
+        var plain = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(AdvancedSettings())) as! [String: Any]
+        plain.removeValue(forKey: "restartAfterCrash")
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: plain)).restartAfterCrash, "旧设置没有这一项时默认开启")
+        var off = AdvancedSettings(); off.restartAfterCrash = false
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(off)) == off, "关掉后保存仍然是关的")
+        check(SettingSearchIndex.results("崩溃").first?.section == 6 && SettingSearchIndex.results("闪退").first?.title == "意外退出后自动重新打开", "设置搜索可以找到这个开关")
+    }
+    static func verifyChineseSearch() {
+        func window(_ title: String, app: String = "App") -> WindowDescriptor {
+            WindowDescriptor(id: title, windowID: 1, pid: 1, appName: app, bundleID: "org.app", title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        }
+        func finds(_ title: String, _ query: String) -> Bool { WindowSearch.matches(window(title), query: query) }
+
+        // Characters with more than one reading.
+        check(finds("重庆", "chongqing") && finds("重庆", "zhongqing"), "多音字：重庆的两个读音都能找到")
+        check(finds("重庆", "cq") && finds("重庆", "zq"), "多音字的每个读音都能用首字母找到")
+        check(finds("中国银行", "yinhang") && finds("中国银行", "zhongguoyinhang") && finds("银行", "yh"), "多音字：银行")
+        check(finds("音乐", "yinyue") && finds("音乐", "yinle"), "多音字：音乐")
+        check(finds("校长", "xiaozhang") && finds("长城", "changcheng"), "多音字：长")
+        check(finds("文件夹", "wenjianjia") && finds("便签", "bianqian") && finds("屏幕", "pingmu"), "多音字：常见的名称")
+        check(WindowSearch.matchKind(window("重庆"), query: "chongqing") == .pinyin, "多音字匹配显示为拼音")
+        check(WindowSearch.highlights(in: "重庆银行", query: "yinhang") == [2..<4], "多音字匹配高亮对应的汉字")
+        check(PinyinReadings.syllables(of: "乐").contains("yue") && PinyinReadings.syllables(of: "乐").contains("le"), "读音表合并系统读音")
+        check(Set(PinyinReadings.syllables(of: "重")).count == PinyinReadings.syllables(of: "重").count, "读音不重复")
+
+        // ü typed as v or u.
+        check(finds("绿色", "lvse") && finds("绿色", "luse"), "ü 可以输入 v 或 u")
+        check(finds("女生", "nvsheng") && finds("女生", "nusheng"), "系统读音里的 ü 也可以输入 v")
+        check(finds("旅行", "lvxing") && finds("率", "shuai") && finds("率", "lv"), "ü 和多音字可以同时出现")
+
+        // Mixed typing.
+        check(finds("微信", "微xin") && finds("微信", "wei信"), "汉字和全拼混合输入")
+        check(finds("微信", "wxin") && finds("微信", "weix") && finds("微信", "微x"), "全拼和首字母混合输入")
+        check(finds("收件箱", "收jian箱") && finds("收件箱", "shoujx") && finds("收件箱", "sjxiang"), "三个字也能混合输入")
+        check(finds("企业微信", "微xin"), "混合输入可以从名称中间开始")
+        check(!finds("微信", "微xun") && !finds("微信", "微a") && !finds("微信", "信微"), "混合输入仍然要求每个字都对上，顺序也不能变")
+        check(WindowSearch.matchKind(window("微信"), query: "微xin") == .pinyin, "混合输入显示为拼音")
+        check(WindowSearch.highlights(in: "微信", query: "微xin") == [0..<2] && WindowSearch.highlights(in: "企业微信", query: "wxin") == [2..<4], "混合输入高亮对应的汉字")
+        check(WindowSearch.matches(window("工作", app: "微信"), query: "wxin"), "应用名也能混合输入")
+
+        // Ranking.
+        func order(_ windows: [WindowDescriptor], _ query: String, _ advanced: (inout AdvancedSettings) -> Void = { _ in }) -> [String] {
+            var settings = UserSettings.defaults
+            advanced(&settings.advanced)
+            return WindowSearch.filtered(windows, settings: settings, profile: settings.shortcuts[0], frontPID: nil, displayID: nil, query: query).map(\.id)
+        }
+        check(order([window("重庆"), window("chongqing notes")], "chongqing") == ["chongqing notes", "重庆"], "名称直接匹配排在多音字前面")
+        check(order([window("微小信息"), window("微信")], "微xin").first == "微信", "混合输入连续匹配")
+        check(order([window("Chrome 帮助"), window("Chrome")], "chrm").count == 2 && order([window("Chrome"), window("charm")], "chrm") == ["charm", "Chrome"], "拼写容错排在跳字匹配前面")
+
+        // Skipping characters.
+        check(finds("Chrome", "chrm") && finds("Safari", "sfri") && finds("Visual Studio Code", "vscode"), "跳字匹配：英文")
+        check(finds("文件管理器", "wjq") && finds("文件管理器", "wjglq") && finds("文件管理器", "文管q"), "跳字匹配：中文")
+        check(!finds("Chrome", "crm") && !finds("Safari", "sar"), "三个字母必须都是词的开头，否则太容易误中")
+        check(finds("PowerPoint Tools", "ppt"), "大小写分开的单词也算词的开头")
+        check(!finds("Safari", "afri"), "跳字匹配必须从词的开头开始")
+        check(!finds("Another long window title that goes on and on before here bcdefg", "abcd"), "相隔太远的字不算跳字匹配")
+        check(!WindowSearch.matches(window("Chrome"), query: "chrm", skips: false), "可以关闭跳字匹配")
+        check(WindowSearch.matchKind(window("Chrome"), query: "chrm") == .skipped && MatchKind.skipped.label == "跳字匹配", "跳字匹配有自己的说明")
+        check(WindowSearch.highlights(in: "Chrome", query: "chrm") == [0..<3, 4..<5], "跳字匹配高亮用到的字")
+        check(WindowSearch.highlights(in: "Chrome", query: "chrm", skips: false).isEmpty, "关闭跳字匹配后不高亮")
+        check(!finds(String(repeating: "a", count: 1000), "aaaaaaaaab") && !finds(String(repeating: "重", count: 1000), "chongzhongchongzhongx"), "很长且重复的标题也能很快判断")
+        check(finds(String(repeating: "x", count: 300) + "微信", "xxx") && !finds(String(repeating: "x", count: 300) + "微信", "微xin"), "超长标题只看前面一段")
+
+        // Double pinyin.
+        func codes(_ syllable: String, _ scheme: ShuangpinScheme) -> [String] { Shuangpin.codes(for: syllable, scheme: scheme) }
+        check(codes("wei", .xiaohe) == ["ww"] && codes("xin", .xiaohe) == ["xb"] && codes("shou", .xiaohe) == ["uz"] && codes("jian", .xiaohe) == ["jm"] && codes("xiang", .xiaohe) == ["xl"], "小鹤双拼的韵母")
+        check(codes("zhong", .xiaohe) == ["vs"] && codes("chuang", .xiaohe) == ["il"] && codes("shuai", .xiaohe) == ["uk"] && codes("ming", .xiaohe) == ["mk"], "小鹤双拼的声母")
+        check(codes("a", .xiaohe) == ["aa"] && codes("ang", .xiaohe) == ["ah"] && codes("eng", .xiaohe) == ["eg"] && codes("o", .xiaohe) == ["oo"], "小鹤双拼的零声母")
+        check(Set(codes("ai", .xiaohe)) == ["ad", "ai"] && Set(codes("ou", .xiaohe)) == ["oz", "ou"] && codes("er", .xiaohe) == ["er"], "小鹤双拼的两字母音节")
+        check(Set(codes("ju", .xiaohe)) == ["ju", "jv"] && codes("lv", .xiaohe) == ["lv"] && codes("lve", .xiaohe) == ["lt"] && codes("nue", .xiaohe) == ["nt"], "小鹤双拼的 ü")
+        check(codes("wei", .ziranma) == ["wz"] && codes("xin", .ziranma) == ["xn"] && codes("shou", .ziranma) == ["ub"] && codes("xiang", .ziranma) == ["xd"] && codes("ming", .ziranma) == ["my"], "自然码的韵母")
+        check(codes("dui", .ziranma) == ["dv"] && codes("hua", .ziranma) == ["hw"] && codes("hun", .ziranma) == ["hp"] && codes("ao", .ziranma).contains("ak"), "自然码的其他韵母")
+        check(codes("wei", .microsoft) == ["wz"] && codes("ming", .microsoft) == ["m;"] && codes("lv", .microsoft) == ["ly"] && Set(codes("lve", .microsoft)) == ["lt", "lv"], "微软双拼")
+        check(Set(codes("a", .microsoft)) == ["oa", "aa"] && Set(codes("er", .microsoft)) == ["or", "er"] && codes("ai", .microsoft).contains("ol"), "微软双拼的零声母")
+        check(codes("ng", .xiaohe).isEmpty && codes("", .xiaohe).isEmpty && codes("wei", .off).isEmpty, "没有对应按键的音节不产生编码")
+        check(!finds("微信", "wwxb"), "默认不把输入当作双拼")
+        check(WindowSearch.matches(window("微信"), query: "wwxb", shuangpin: .xiaohe) && WindowSearch.matches(window("微信"), query: "wzxn", shuangpin: .ziranma) && WindowSearch.matches(window("微信"), query: "wzxn", shuangpin: .microsoft), "三种双拼都能找到微信")
+        check(!WindowSearch.matches(window("微信"), query: "wzxn", shuangpin: .xiaohe), "只认选中的双拼方案")
+        check(WindowSearch.matches(window("收件箱"), query: "uzjmxl", shuangpin: .xiaohe) && WindowSearch.matches(window("中文"), query: "vswf", shuangpin: .xiaohe), "小鹤双拼能找到更长的名称")
+        check(WindowSearch.matches(window("微信"), query: "微xb", shuangpin: .xiaohe) && WindowSearch.matches(window("微信"), query: "weixin", shuangpin: .xiaohe), "选了双拼仍然可以用汉字和全拼")
+        check(WindowSearch.matches(window("重庆"), query: "isqk", shuangpin: .xiaohe) && WindowSearch.matches(window("重庆"), query: "vsqk", shuangpin: .xiaohe) && WindowSearch.matches(window("重庆"), query: "isqy", shuangpin: .ziranma), "多音字的每个读音都有双拼")
+        check(WindowSearch.highlights(in: "微信", query: "wwxb", shuangpin: .xiaohe) == [0..<2] && WindowSearch.highlights(in: "微信", query: "wwxb").isEmpty, "双拼高亮对应的汉字，同一段文字不受其他方案影响")
+        check(WindowSearch.matchKind(window("微信"), query: "wwxb", shuangpin: .xiaohe) == .pinyin, "双拼显示为拼音")
+
+        // Settings.
+        check(AdvancedSettings().searchSkips && AdvancedSettings().shuangpin == .off, "默认开启跳字匹配，不使用双拼")
+        var plain = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(AdvancedSettings())) as! [String: Any]
+        plain.removeValue(forKey: "searchSkips"); plain.removeValue(forKey: "shuangpin")
+        let old = try! JSONDecoder().decode(AdvancedSettings.self, from: JSONSerialization.data(withJSONObject: plain))
+        check(old.searchSkips && old.shuangpin == .off, "旧设置没有这两项时采用默认值")
+        var chosen = AdvancedSettings(); chosen.searchSkips = false; chosen.shuangpin = .ziranma
+        check(try! JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(chosen)) == chosen, "搜索方式保存后不变")
+        check(order([window("微信")], "wwxb") == [] && order([window("微信")], "wwxb", { $0.shuangpin = .xiaohe }) == ["微信"], "选了双拼方案后搜索结果跟着变")
+        check(order([window("Chrome")], "chrm") == ["Chrome"] && order([window("Chrome")], "chrm", { $0.searchSkips = false }) == [], "关闭跳字匹配后搜索结果跟着变")
+        check(SettingSearchIndex.results("双拼").first?.section == 1 && SettingSearchIndex.results("跳字").first?.section == 1, "设置搜索可以找到新选项")
+    }
+    static func verifyDockPreviewExtras() {
+        func window(_ id: String, minimized: Bool = false, hidden: Bool = false, here: Bool = true, frame: WindowRect? = WindowRect(x: 10, y: 20, width: 800, height: 600)) -> WindowDescriptor {
+            var d = WindowDescriptor(id: id, windowID: 7, pid: 1, appName: "应用", bundleID: "a", title: id, minimized: minimized, hidden: hidden, onCurrentSpace: here, displayID: 1, aspectRatio: 1.5)
+            d.frame = frame
+            return d
+        }
+        // Settings.
+        check(!DockPreviewSettings().liveThumbnails && !DockPreviewSettings().peekWindow, "实时更新和窗口位置预览默认关闭")
+        let old = try! JSONDecoder().decode(DockPreviewSettings.self, from: Data(#"{"enabled":false,"delay":150,"includeMinimized":false}"#.utf8))
+        check(!old.enabled && old.delay == 150 && !old.includeMinimized && !old.liveThumbnails && !old.peekWindow, "旧设置没有新字段时保留原值，新开关采用默认值")
+        var on = DockPreviewSettings(); on.liveThumbnails = true; on.peekWindow = true; on.delay = 500
+        let back = try! JSONDecoder().decode(DockPreviewSettings.self, from: JSONEncoder().encode(on))
+        check(back == on, "打开的开关保存后仍然是开的")
+        var whole = UserSettings.defaults
+        whole.dockPreview = on
+        check(try! JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(whole)).dockPreview == on, "整份设置保存后，打开的开关不变")
+        var earlier = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(whole)) as! [String: Any]
+        var earlierAdvanced = earlier["advanced"] as! [String: Any]
+        earlierAdvanced["preferencesRevision"] = 2
+        earlier["advanced"] = earlierAdvanced
+        let turnedOff = try! JSONDecoder().decode(UserSettings.self, from: JSONSerialization.data(withJSONObject: earlier)).dockPreview
+        check(!turnedOff.liveThumbnails && !turnedOff.peekWindow && turnedOff.delay == 500, "2.5.0 测试版存下的实时更新和原位显示改为关闭，其他设置保留")
+
+        // Live pictures.
+        let p = DockPreviewPolicy.self
+        let cards = [window("a"), window("b"), window("c")]
+        check(p.dueForRefresh(cards, hovered: nil, capturedAt: ["a": 100, "b": 100, "c": 100], now: 101).isEmpty, "刚读过的预览图不会马上再读")
+        check(p.dueForRefresh(cards, hovered: "b", capturedAt: ["a": 100, "b": 100, "c": 100], now: 101) == ["b"], "指针下的窗口每秒更新，其他窗口要等更久")
+        check(p.dueForRefresh(cards, hovered: nil, capturedAt: ["a": 100, "b": 99, "c": 97], now: 103) == ["c", "b", "a"], "等得最久的窗口先更新")
+        check(p.dueForRefresh(cards, hovered: "a", capturedAt: ["a": 90, "b": 80, "c": 70], now: 100).first == "a", "指针下的窗口排在等得更久的窗口之前")
+        check(p.dueForRefresh(cards, hovered: nil, capturedAt: [:], now: 100).count == 3, "没读过的窗口也会更新")
+        let many = (0..<12).map { window("w\($0)") }
+        check(p.dueForRefresh(many, hovered: nil, capturedAt: [:], now: 100).count == p.perTick, "窗口再多，每次也只读有限的几个")
+        let quiet = [window("mini", minimized: true), window("hid", hidden: true), window("away", here: false)]
+        check(p.dueForRefresh(quiet, hovered: "mini", capturedAt: [:], now: 100).isEmpty, "最小化、隐藏和其他桌面的窗口保留原来的画面")
+        var noID = WindowDescriptor(id: "x", windowID: nil, pid: 1, appName: "应用", bundleID: "a", title: "x", minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        check(p.dueForRefresh([noID], hovered: "x", capturedAt: [:], now: 100).isEmpty, "没有窗口编号的条目无法更新")
+
+        // The window at its own place.
+        check(p.peekFrame(of: window("a")) == WindowRect(x: 10, y: 20, width: 800, height: 600), "画面显示在窗口原来的位置")
+        check(p.peekFrame(of: window("a", minimized: true)) == nil, "最小化的窗口不显示")
+        check(p.peekFrame(of: window("a", hidden: true)) == nil, "隐藏的窗口不显示")
+        check(p.peekFrame(of: window("a", here: false)) == nil, "其他桌面的窗口不显示")
+        check(p.peekFrame(of: window("a", frame: nil)) == nil, "不知道位置的窗口不显示")
+        check(p.peekFrame(of: window("a", frame: WindowRect(x: 0, y: 0, width: 20, height: 20))) == nil, "太小的窗口不显示")
+        noID.frame = WindowRect(x: 0, y: 0, width: 400, height: 400)
+        check(p.peekFrame(of: noID) == nil, "没有窗口编号的条目读不到画面，不显示")
+
+        // Middle click.
+        check(p.middleClickTarget(down: "a", up: "a") == "a", "在同一张卡片上按下和松开算一次中键点按")
+        check(p.middleClickTarget(down: "a", up: "b") == nil, "按下和松开不在同一张卡片上不关闭")
+        check(p.middleClickTarget(down: nil, up: "a") == nil, "按下时不在卡片上不关闭")
+        check(p.middleClickTarget(down: "a", up: nil) == nil, "松开时不在卡片上不关闭")
+
+        // A window that changes state stays in the list.
+        check(p.sameCards([window("a")], [window("a")]), "没有变化时不重新排版")
+        check(!p.sameCards([window("a")], [window("a", minimized: true)]), "窗口最小化后卡片要更新")
+        check(!p.sameCards([window("a")], [window("a", hidden: true)]), "应用隐藏后卡片要更新")
+        check(!p.sameCards([window("a"), window("b")], [window("a")]), "窗口关闭后卡片要更新")
+
+        // The card under the pointer after the list is read again.
+        check(p.hoverAfterRefresh("b", old: ["a", "b"], new: ["a", "b"]) == "b", "卡片没有变时，指针仍在同一张卡片上")
+        check(p.hoverAfterRefresh("b", old: ["a", "b", "c"], new: ["b", "c"]) == nil, "卡片挪了位置以后，不再认定指针还在原来那张上")
+        check(p.hoverAfterRefresh("b", old: ["a", "b"], new: ["b", "a"]) == nil, "卡片换了顺序也一样")
+        check(p.hoverAfterRefresh(nil, old: ["a"], new: ["a"]) == nil && p.hoverAfterRefresh("x", old: ["a"], new: ["a"]) == nil, "原来不在卡片上，刷新后也不在")
+
+        // The card under a pointer that has not moved, from where the cards are drawn.
+        let before = ["a": CGRect(x: 14, y: 50, width: 200, height: 150), "b": CGRect(x: 224, y: 50, width: 200, height: 150)]
+        let point = CGPoint(x: 100, y: 120)
+        check(p.card(at: point, frames: before) == "a", "按卡片画的位置认出指针下的卡片")
+        // "a" closed and "b" moved into its place: the pointer is on "b" now without having moved.
+        let after = ["b": CGRect(x: 14, y: 50, width: 200, height: 150)]
+        check(p.card(at: point, frames: after) == "b", "卡片挪到指针下以后，不移动鼠标也认得出新卡片")
+        check(p.card(at: CGPoint(x: 219, y: 120), frames: before) == nil, "两张卡片之间的空隙不算在任何一张上")
+        check(p.card(at: CGPoint(x: 100, y: 20), frames: before) == nil, "标题栏那一行不算卡片")
+        check(p.card(at: point, frames: [:]) == nil, "还没有排版时不猜")
+        check(p.card(at: point, frames: ["a": .zero, "b": CGRect(x: 90, y: 110, width: 0, height: 40)]) == nil, "大小为零的卡片不算")
+        let overlap = ["z": CGRect(x: 0, y: 0, width: 300, height: 300), "m": CGRect(x: 0, y: 0, width: 300, height: 300)]
+        check(p.card(at: point, frames: overlap) == "m" && p.card(at: point, frames: overlap) == p.card(at: point, frames: overlap), "万一重叠，每次给出同一张")
+        // A middle click pressed on "a", which then moved away, and let go on "b", now in its place, closes neither.
+        check(p.middleClickTarget(down: p.card(at: point, frames: before), up: p.card(at: point, frames: after)) == nil, "按下和松开之间卡片挪了位置时不关闭")
+
+        // A card's picture made from the full-size frame.
+        func small(_ width: Int, _ height: Int, _ pixels: Int) -> [Int]? {
+            p.thumbnailSize(width: width, height: height, pixelWidth: pixels).map { [$0.width, $0.height] }
+        }
+        check(small(3200, 2000, 640) == [640, 400], "整窗截图按卡片需要的宽度缩小")
+        check(small(300, 200, 640) == [300, 200], "比卡片小的截图不放大")
+        check(small(3200, 2000, 100) == [320, 200] && small(3200, 2000, 5000) == [1280, 800], "宽度的上下限和直接截的缩略图相同")
+        check(small(1000, 4000, 640) == [213, 853], "很高的窗口按高度的限制缩小")
+        check(small(0, 100, 640) == nil && small(100, 0, 640) == nil, "尺寸不合理时不生成")
+
+        // Findable in settings.
+        check(SettingSearchIndex.results("实时更新预览图").first?.section == 3 && SettingSearchIndex.results("悬停时在窗口原来的位置显示它").first?.section == 3, "新开关可以在设置搜索里找到")
+    }
+    static func verifySearchHabits() {
+        let day = 86_400.0, start = 1_000_000.0, a = "app:a", b = "app:b"
+        func taught(_ choices: [(query: String, target: String)]) -> SearchHabits {
+            var habits = SearchHabits()
+            for choice in choices { habits.record(query: choice.query, target: choice.target, now: start) }
+            return habits
+        }
+        func repeated(_ count: Int, _ target: String, _ query: String = "wx") -> [(query: String, target: String)] {
+            Array(repeating: (query: query, target: target), count: count)
+        }
+        check(taught(repeated(1, a)).scores(for: "wx", now: start).isEmpty, "选一次可能是手滑，不改变排序")
+        check(taught(repeated(2, a)).scores(for: "wx", now: start)[a] != nil, "同一个搜索选两次后排到前面")
+        check(taught(repeated(2, a) + repeated(1, b)).scores(for: "wx", now: start).isEmpty, "改选别的结果后，旧习惯先退下来")
+        let changed = taught(repeated(10, a) + repeated(2, b)).scores(for: "wx", now: start)
+        check((changed[b] ?? 0) > (changed[a] ?? 0), "用了很久的习惯，改选两次后也会让位")
+
+        let light = taught(repeated(2, a)), strong = taught(repeated(10, a))
+        check(light.scores(for: "wx", now: start + 10 * day)[a] != nil, "几天不用，习惯还在")
+        check(light.scores(for: "wx", now: start + 30 * day).isEmpty && strong.scores(for: "wx", now: start + 30 * day)[a] != nil, "只选过两次的忘得快，选过很多次的留得久")
+        check(strong.scores(for: "wx", now: start + 120 * day).isEmpty, "很久不用的习惯会被忘掉")
+        check(light.scores(for: "wx", now: start - 30 * day)[a] == light.scores(for: "wx", now: start)[a], "时钟被调回去时，习惯不会变强")
+
+        check(taught(repeated(4, a, "chrome")).scores(for: "ch", now: start)[a] != nil, "输入全名选得多了，输入开头几个字也算")
+        check(taught(repeated(3, a, "chrome")).scores(for: "ch", now: start).isEmpty, "只算一部分：较短的搜索要选得更多才生效")
+        check(taught(repeated(4, a, "ch")).scores(for: "chrome", now: start)[a] != nil, "输入开头几个字选得多了，输入全名也算")
+        let both = taught(repeated(10, a, "ch") + repeated(10, b, "chess")).scores(for: "ch", now: start)
+        check((both[a] ?? 0) > (both[b] ?? 0), "正好是这个搜索选的，比更长的搜索选的更算数")
+        check(taught(repeated(10, a)).scores(for: "mail", now: start).isEmpty, "不相关的搜索不受影响")
+        check(taught(repeated(10, a)).scores(for: "", now: start).isEmpty && taught(repeated(10, a)).scores(for: "   ", now: start).isEmpty, "没有输入时没有习惯")
+        check(taught(repeated(2, a, "  WX ")).scores(for: "wx", now: start)[a] != nil, "忽略大小写和首尾空格")
+        check(taught(repeated(2, a, "Wei  Xin")).scores(for: "wei xin", now: start)[a] != nil, "多个空格算一个")
+
+        check(taught(repeated(2, a, String(repeating: "x", count: SearchHabits.longestQuery))).count == 1, "普通长度的搜索会记住")
+        check(taught(repeated(2, a, String(repeating: "x", count: SearchHabits.longestQuery + 1))).count == 0, "粘贴的长文本不写进本机存储")
+        check(taught(repeated(2, a, "   ")).count == 0, "空白不记录")
+        var crowded = SearchHabits()
+        for index in 0..<(SearchHabits.queryLimit + 3) { crowded.record(query: "q\(index)", target: a, now: start + Double(index)) }
+        check(crowded.count == SearchHabits.queryLimit, "记住的搜索有上限")
+        check(crowded.queries["q0"] == nil && crowded.queries["q\(SearchHabits.queryLimit + 2)"] != nil, "超过上限时忘掉最久没用的")
+        var busy = SearchHabits()
+        for index in 0..<(SearchHabits.targetLimit + 3) { busy.record(query: "wx", target: "app:\(index)", now: start) }
+        check(busy.queries["wx"]?.count == SearchHabits.targetLimit, "一个搜索记住的结果有上限")
+        check(busy.queries["wx"]?["app:\(SearchHabits.targetLimit + 2)"] != nil, "刚选的结果一定留下")
+        let saved = try! JSONEncoder().encode(strong)
+        let restored = SearchHabits.decoded(saved)
+        check(restored.count == 1 && restored.scores(for: "wx", now: start)[a] != nil, "保存后读回来还在")
+        check(SearchHabits.decoded(Data("不是 JSON".utf8)).count == 0 && SearchHabits.decoded(nil).count == 0, "读不出来时从空开始，不影响启动")
+
+        func window(_ id: String, app: String, bundle: String, title: String) -> WindowDescriptor {
+            WindowDescriptor(id: id, windowID: nil, pid: 1, appName: app, bundleID: bundle, title: title, minimized: false, hidden: false,
+                             onCurrentSpace: true, displayID: 1, aspectRatio: 1.6)
+        }
+        let wechat = window("cg:1", app: "微信", bundle: "app.wechat", title: "微信"), notes = window("cg:2", app: "备忘录", bundle: "app.notes", title: "wx-notes")
+        check(SearchHabits.target(of: wechat) == "app:app.wechat", "窗口按应用记住，不记标题和窗口编号")
+        var tab = wechat; tab.browserTab = true
+        check(SearchHabits.target(of: tab) == "app:app.wechat", "标签页也按应用记住，不记网址")
+        var opener = window("launch:app:app.wx", app: "wx 工具", bundle: "app.wx", title: "wx 工具"); opener.launcher = .app
+        check(SearchHabits.target(of: opener) == "app:app.wx", "没打开的应用和打开后的窗口算同一个")
+        var page = window("launch:setting:wifi", app: "设置", bundle: "wifi", title: "无线局域网"); page.launcher = .setting
+        check(SearchHabits.target(of: page) == "launch:setting:wifi", "设置页面按自己记住")
+        var icon = window("menubar:clock", app: "时钟", bundle: "app.clock", title: "时钟"); icon.menuBarItem = true
+        check(SearchHabits.target(of: icon) == "menubar:clock", "菜单栏图标按自己记住")
+        check(SearchHabits.target(of: window("cg:9", app: "无标识", bundle: "", title: "x")) == nil, "没有应用标识的窗口不记")
+
+        let settings = UserSettings.defaults, profile = settings.shortcuts[0]
+        func found(_ windows: [WindowDescriptor], _ query: String, _ learned: [String: Double] = [:]) -> [String] {
+            WindowSearch.filtered(windows, settings: settings, profile: profile, frontPID: nil, displayID: 1, query: query, learned: learned).map(\.id)
+        }
+        check(found([wechat, notes], "wx") == ["cg:2", "cg:1"], "没有习惯时，名称直接匹配排在拼音首字母之前")
+        check(found([wechat, notes], "wx", ["app:app.wechat": 1.7]) == ["cg:1", "cg:2"], "常选的结果排到最前，哪怕名称匹配更弱")
+        check(found([notes, wechat], "", ["app:app.wechat": 1.7]) == ["cg:2", "cg:1"], "没有输入时，习惯不影响切换顺序")
+        let mail = window("cg:3", app: "邮件", bundle: "app.mail", title: "邮件")
+        check(found([mail, notes], "wx", ["app:app.mail": 9]) == ["cg:2"], "常选的结果不匹配这次搜索时不会出现")
+        let first = window("cg:4", app: "甲", bundle: "app.first", title: "wx 甲"), second = window("cg:5", app: "乙", bundle: "app.second", title: "wx 乙")
+        check(found([first, second], "wx", ["app:app.first": 1.6, "app:app.second": 2]) == ["cg:5", "cg:4"], "都常选时，选得多的在前")
+        check(found([notes, opener], "wx").first == "cg:2", "没有习惯时，已打开的窗口排在要打开的应用之前")
+        check(found([notes, opener], "wx", ["app:app.wx": 1.7]).first == opener.id, "常选的应用即使没打开也排到前面")
+        var openers = (0..<WindowSearch.launcherLimit).map { index -> WindowDescriptor in
+            var item = window("launch:app:more\(index)", app: "wx\(index)", bundle: "more\(index)", title: "wx\(index)"); item.launcher = .app; return item
+        }
+        var longName = window("launch:app:long", app: "wx 名字很长的工具", bundle: "app.long", title: "wx 名字很长的工具"); longName.launcher = .app
+        openers.append(longName)
+        check(!found(openers, "wx").contains("launch:app:long"), "要打开的应用太多时，名字长的排不进去")
+        check(found(openers, "wx", ["app:app.long": 1.7]).first == "launch:app:long", "常选的应用不会被上限挤掉")
+
+        check(AdvancedSettings().searchLearning, "默认把常选的结果排到前面")
+        let older = try? JSONDecoder().decode(AdvancedSettings.self, from: Data("{}".utf8))
+        check(older?.searchLearning == true, "旧版本的设置升级后也开启")
+        var off = AdvancedSettings(); off.searchLearning = false
+        let reloaded = try? JSONDecoder().decode(AdvancedSettings.self, from: JSONEncoder().encode(off))
+        check(reloaded?.searchLearning == false, "关闭后保存下来")
+        check(SettingSearchIndex.results("常选").first?.section == 1 && SettingSearchIndex.results("搜索记录").first?.title == "把常选的结果排到前面", "设置搜索可以找到这个开关")
+    }
+    /// Runs the real scripts in JavaScriptCore against stand-ins for each kind of browser. This proves the scripts parse
+    /// and take the right path; only a Mac with the browsers installed can prove the browsers answer the same way.
+    static func verifyBrowserScripts() {
+        let stubs = #"""
+        var requested = '', selected = '', raised = false, activated = false, hacked = false;
+        function evil() { hacked = true; }
+        function tabList(list) {
+          const tabs = list.map(t => ({ select() { selected = t.title; } }));
+          tabs.title = () => list.map(t => t.title);
+          tabs.name = tabs.title;
+          tabs.url = () => list.map(t => t.url);
+          tabs.id = () => list.map(t => t.id);
+          return tabs;
+        }
+        function plain(id, list, stuck) {
+          const w = { id: () => id, tabs: tabList(list) };
+          Object.defineProperty(w, 'index', { set() { if (stuck) throw new Error('stuck'); raised = true; } });
+          return w;
+        }
+        function chromium(id, active, list, stuck) {
+          const w = plain(id, list, stuck);
+          Object.defineProperty(w, 'activeTabIndex', { get: () => () => active, set(v) { selected = list[v - 1].title; } });
+          return w;
+        }
+        function arc(id, activeID, list) {
+          const w = plain(id, list);
+          w.activeTab = { id: () => activeID };
+          return w;
+        }
+        function safari(id, active, list) {
+          const w = plain(id, list);
+          Object.defineProperty(w, 'currentTab', { get: () => ({ index: () => active }), set(tab) { selected = list[w.tabs.indexOf(tab)].title; } });
+          return w;
+        }
+        function Application(id) {
+          requested = id;
+          return { windows: () => windows, activate() { activated = true; } };
+        }
+        var sample = [{ id: 'x', title: '甲', url: 'u1' }, { id: 'y', title: '乙', url: 'u2' }, { id: 'z', title: '丙', url: '' }];
+        """#
+        func run(_ script: String?, windows: String) -> (answer: String, selected: String, raised: Bool, activated: Bool, requested: String, hacked: Bool) {
+            guard let script, let context = JSContext() else { return ("没有脚本", "", false, false, "", false) }
+            context.evaluateScript(stubs)
+            context.evaluateScript("var windows = [\(windows)];")
+            let answer = context.evaluateScript(script)
+            if let failure = context.exception { return ("脚本出错：\(failure)", "", false, false, "", false) }
+            func text(_ name: String) -> String { context.objectForKeyedSubscript(name)?.toString() ?? "" }
+            return (answer?.toString() ?? "", text("selected"), text("raised") == "true", text("activated") == "true", text("requested"), text("hacked") == "true")
+        }
+        func listing(_ windows: String, bundleID: String = "b", chromium: Bool = true) -> String {
+            let answer = run(BrowserTabScript.list(bundleID: bundleID, chromium: chromium), windows: windows).answer
+            let decoded = try? JSONDecoder().decode([BrowserWindowTabs].self, from: Data(answer.utf8))
+            return (decoded ?? []).map { window -> String in
+                let titles = window.titles.map { $0 ?? "空" }.joined(separator: ",")
+                let urls = window.urls.map { $0 ?? "空" }.joined(separator: ",")
+                return "\(window.id)|\(window.active)|\(titles)|\(urls)"
+            }.joined(separator: ";")
+        }
+        let tabs = "甲,乙,丙|u1,u2,"
+        check(listing("chromium('w1', 2, sample)") == "w1|2|\(tabs)", "Chromium：窗口编号是文本时也能读出标签页")
+        check(listing("chromium(7, 1, sample)") == "7|1|\(tabs)", "较旧的 Chromium：窗口编号是数字时同样能读")
+        check(listing("arc('w1', 'y', sample)") == "w1|2|\(tabs)", "Arc：没有当前标签页序号，用当前标签页的编号算出来")
+        check(listing("safari(9, 3, sample)", chromium: false) == "9|3|\(tabs)", "Safari 仍然用它自己的接口")
+        check(listing("arc('w1', 'none', sample)") == "w1|0|\(tabs)", "找不到当前标签页时记为 0，所有标签页都列出")
+        check(listing("plain('w1', sample)") == "w1|0|\(tabs)", "连当前标签页都不提供的浏览器，所有标签页也都列出")
+        check(listing("{ id() { throw new Error('closing'); } }, chromium('w2', 1, sample)") == "w2|1|\(tabs)", "读不出的窗口被跳过，不影响其他窗口")
+        check(listing("") == "", "没有窗口时列表为空")
+
+        func activate(_ windows: String, windowID: String = "w1", index: Int = 2, url: String = "u2", title: String = "乙", chromium: Bool = true) -> (answer: String, selected: String, raised: Bool, activated: Bool, requested: String, hacked: Bool) {
+            run(BrowserTabScript.activate(bundleID: "b", windowID: windowID, tabIndex: index, url: url, title: title, chromium: chromium), windows: windows)
+        }
+        let direct = activate("chromium('w1', 1, sample)")
+        check(direct.answer == "ok" && direct.selected == "乙", "Chromium：用序号切换标签页")
+        check(direct.raised && direct.activated, "切换后窗口到最前，浏览器到前台")
+        check(activate("arc('w1', 'x', sample)").selected == "乙", "Arc：没有序号时用 select 切换")
+        check(activate("safari('w1', 1, sample)", chromium: false).selected == "乙", "Safari：用 currentTab 切换")
+        check(activate("chromium(7, 1, sample)", windowID: "7").answer == "ok", "数字编号的窗口也能按文本找到")
+        check(activate("chromium('w0', 1, sample), chromium('w1', 1, sample)").answer == "ok", "在多个窗口里找到对应的那个")
+        check(activate("chromium('w1', 1, sample, true)").answer == "ok", "窗口提不到最前也算切换成功")
+        check(activate("chromium('w1', 1, sample)", index: 1).selected == "乙", "标签页移动后按网址找到")
+        check(activate("chromium('w1', 1, sample)", index: 1, url: "changed", title: "甲").selected == "甲", "网址也变了时按标题找到")
+        check(activate("safari('w1', 1, sample)", index: 1, url: "changed", title: "丙", chromium: false).selected == "丙", "Safari 按标题找时用它自己的接口")
+        check(activate("chromium('w1', 1, sample)", index: 3, url: "").selected == "丙", "没有网址的标签页也能按位置切换")
+        let closed = activate("chromium('w1', 1, sample)", index: 1, url: "changed", title: "没有")
+        check(closed.answer == "gone" && closed.selected.isEmpty && !closed.activated, "标签页已经关闭时如实报告，不切换")
+        check(activate("chromium('w1', 1, sample)", url: "changed", title: "").answer == "gone", "没有标题时不会误配空标题")
+        let noWindow = activate("chromium('w1', 1, sample)", windowID: "w9")
+        check(noWindow.answer == "gone" && !noWindow.activated, "窗口已经关闭时如实报告")
+
+        for hostile in ["x'); evil(); ('", "\"); evil(); (\"", "`${evil()}`", "\\\"); evil(); //"] {
+            let listed = run(BrowserTabScript.list(bundleID: hostile, chromium: true), windows: "")
+            check(!listed.hacked && listed.requested == hostile, "应用标识来自别的应用，只能作为字符串进入脚本")
+            let chosen = run(BrowserTabScript.activate(bundleID: hostile, windowID: hostile, tabIndex: 1, url: hostile, title: hostile, chromium: true), windows: "chromium('w1', 1, sample)")
+            check(!chosen.hacked && chosen.requested == hostile && chosen.answer == "gone", "窗口编号、网址和标题也不能变成代码")
+        }
+
+        let dictionary = #"<class name="window"><property name="active tab" code="acTa"/><property name="active tab index" code="acTI"/></class><class name="tab" code="CrTb"><property name="URL" code="URL "/></class>"#
+        check(BrowserTabScript.offersChromiumTabs(dictionary: dictionary), "提供 Chromium 脚本接口的应用算浏览器")
+        check(!BrowserTabScript.offersChromiumTabs(dictionary: #"<class name="tab"><property name="URL"/><property name="current tab"/></class>"#), "Safari 式的接口不走 Chromium 脚本")
+        check(!BrowserTabScript.offersChromiumTabs(dictionary: #"<class name="tab"><property name="selected tab"/></class>"#), "终端这类有标签页但没有网址的应用不算")
+        check(!BrowserTabScript.offersChromiumTabs(dictionary: ""), "没有脚本接口的应用不算")
+    }
+    static func verifyRecentOrder() {
+        func window(_ id: String, pid: Int32, bundle: String, title: String = "机密标题") -> WindowDescriptor {
+            WindowDescriptor(id: id, windowID: nil, pid: pid, appName: "应用", bundleID: bundle, title: title, minimized: false, hidden: false,
+                             onCurrentSpace: true, displayID: 1, aspectRatio: 1.6)
+        }
+        let safari = "com.apple.Safari", mail = "com.apple.mail"
+        let listed = [window("cg:10", pid: 100, bundle: safari), window("cg:20", pid: 200, bundle: mail),
+                      window("ax:100:7", pid: 100, bundle: safari), window("cg:30", pid: 100, bundle: safari)]
+        let focus = ["cg:10": 300.0, "cg:20": 400.0, "ax:100:7": 500.0, "100|机密标题": 600.0, "cg:99": 700.0]
+        let order = RecentOrderPolicy.snapshot(focus: focus, windows: listed, apps: [mail: 450, "com.apple.Notes": 50], previous: RecentOrder())
+        check(order.windows.map(\.id) == ["cg:20", "cg:10"], "只保存有窗口编号、用过而且还开着的窗口，最近的在前")
+        check(order.windows[0] == RecentOrder.WindowUse(id: "cg:20", pid: 200, bundleID: mail, time: 400), "记下进程和应用，重启后才能确认还是同一个窗口")
+        check(order.apps == [safari: 500, mail: 450, "com.apple.Notes": 50], "应用的时间取窗口和应用里最近的一次，没在运行的应用也留着")
+        let saved = try! JSONEncoder().encode(order)
+        check(!String(decoding: saved, as: UTF8.self).contains("机密"), "窗口标题不写进本机存储")
+        check(RecentOrderPolicy.decoded(saved) == order, "保存后读回来不变")
+        check(RecentOrderPolicy.decoded(Data("不是 JSON".utf8)) == RecentOrder() && RecentOrderPolicy.decoded(nil) == RecentOrder(), "读不出来时从空开始，不影响启动")
+        check(RecentOrderPolicy.snapshot(focus: [:], windows: [], apps: [:], previous: order).windows == order.windows, "还没读到窗口时不丢掉上次保存的窗口")
+        check(RecentOrderPolicy.snapshot(focus: [:], windows: listed, apps: [:], previous: order).windows.isEmpty, "读到窗口后，已经关闭的窗口不再保存")
+
+        let many = (0..<(RecentOrderPolicy.windowLimit + 5)).map { window("cg:\($0)", pid: 1, bundle: "app.\($0)") }
+        let manyFocus = Dictionary(uniqueKeysWithValues: many.enumerated().map { ($0.element.id, Double($0.offset + 1)) })
+        let capped = RecentOrderPolicy.snapshot(focus: manyFocus, windows: many, apps: [:], previous: RecentOrder())
+        check(capped.windows.count == RecentOrderPolicy.windowLimit && capped.windows.first?.id == many.last?.id && !capped.windows.contains(where: { $0.id == "cg:0" }), "窗口超过上限时留下最近用过的")
+        check(capped.apps.count == RecentOrderPolicy.appLimit && capped.apps["app.0"] == nil && capped.apps[many[many.count - 1].bundleID] != nil, "应用超过上限时留下最近用过的")
+        check(RecentOrderPolicy.snapshot(focus: ["cg:1": 5], windows: [window("cg:1", pid: 1, bundle: "")], apps: ["": 9, "zero": 0], previous: RecentOrder()).apps.isEmpty, "没有应用标识或没有时间的不保存")
+
+        let running: [Int32: String] = [100: safari, 200: mail]
+        let earlier = RecentOrder(windows: [
+            .init(id: "cg:10", pid: 100, bundleID: safari, time: 300),
+            .init(id: "cg:20", pid: 201, bundleID: mail, time: 400),
+            .init(id: "cg:21", pid: 200, bundleID: "com.apple.Notes", time: 410),
+            .init(id: "cg:22", pid: 999, bundleID: "gone", time: 420),
+            .init(id: "cg:23", pid: 100, bundleID: safari, time: 900),
+            .init(id: "cg:24", pid: 100, bundleID: safari, time: 0)], apps: [mail: 450, "": 460, "late": 900, "zero": 0])
+        check(RecentOrderPolicy.restoredFocus(earlier, runningApps: running, now: 500) == ["cg:10": 300, "cg:23": 500], "只认同一进程、同一应用的窗口；进程换了或编号被重用都不算；超前的时间不超过现在")
+        check(RecentOrderPolicy.restoredApps(earlier, now: 500) == [mail: 450, "late": 500], "应用时间同样不超过现在，无效的丢弃")
+
+        let known = window("cg:10", pid: 100, bundle: safari, title: "甲")
+        func used(focus: [String: Double] = [:], activated: [Int32: Double] = [:], apps: [String: Double] = [:]) -> Double {
+            RecentOrderPolicy.lastFocused(known, focus: focus, activated: activated, apps: apps)
+        }
+        check(used(focus: ["cg:10": 4, "100|甲": 3], activated: [100: 2], apps: [safari: 1]) == 4, "窗口自己的记录优先")
+        check(used(focus: ["100|甲": 3], activated: [100: 2], apps: [safari: 1]) == 3, "其次是按标题记下的这次运行里的记录")
+        check(used(activated: [100: 2], apps: [safari: 1]) == 2, "然后是应用这次运行里的激活时间")
+        check(used(apps: [safari: 1]) == 1, "最后是应用以前保存的时间")
+        check(used() == 0, "从没用过的排在最后")
+
+        let settings = UserSettings.defaults, profile = settings.shortcuts[0]
+        func relisted(_ windows: [WindowDescriptor], from before: RecentOrder, running: [Int32: String]) -> [String] {
+            let restored = RecentOrderPolicy.restoredFocus(before, runningApps: running, now: 1000), apps = RecentOrderPolicy.restoredApps(before, now: 1000)
+            let timed = windows.map { item -> WindowDescriptor in
+                var copy = item
+                copy.lastFocused = RecentOrderPolicy.lastFocused(item, focus: restored, activated: [:], apps: apps)
+                return copy
+            }
+            return WindowSearch.filtered(timed, settings: settings, profile: profile, frontPID: nil, displayID: 1, query: "").map(\.id)
+        }
+        let current = [window("cg:1", pid: 1, bundle: "app.a"), window("cg:2", pid: 2, bundle: "app.b"), window("cg:3", pid: 2, bundle: "app.b")]
+        let before = RecentOrderPolicy.decoded(try! JSONEncoder().encode(RecentOrderPolicy.snapshot(focus: ["cg:3": 300, "cg:1": 200, "cg:2": 100], windows: current, apps: [:], previous: RecentOrder())))
+        check(relisted(current, from: before, running: [1: "app.a", 2: "app.b"]) == ["cg:3", "cg:1", "cg:2"], "只重启一瞥：每个窗口都回到原来的位置")
+        let reopened = [window("cg:51", pid: 11, bundle: "app.a"), window("cg:52", pid: 12, bundle: "app.b"), window("cg:53", pid: 12, bundle: "app.b"), window("cg:54", pid: 13, bundle: "app.new")]
+        check(relisted(reopened, from: before, running: [11: "app.a", 12: "app.b", 13: "app.new"]) == ["cg:52", "cg:53", "cg:51", "cg:54"], "重启电脑：按应用恢复顺序，没用过的应用排在最后")
+    }
+    static func verifySettingsEntry() {
+        check(SettingsWindowEntry.isOpen(visible: true, minimized: false, setAside: false), "显示着的设置窗口进入列表")
+        check(SettingsWindowEntry.isOpen(visible: false, minimized: true, setAside: false), "最小化的设置窗口进入列表")
+        check(SettingsWindowEntry.isOpen(visible: false, minimized: false, setAside: true), "面板打开时暂时让开的设置窗口进入列表")
+        check(!SettingsWindowEntry.isOpen(visible: false, minimized: false, setAside: false), "关闭的设置窗口不进入列表")
+        let frame = WindowRect(x: 100, y: 50, width: 980, height: 740)
+        func entry(minimized: Bool = false, isKey: Bool = false, lastFocused: Double = 250) -> WindowDescriptor {
+            SettingsWindowEntry.descriptor(pid: 99, bundleID: "com.jethro.windowhop", frame: frame, displayID: 1, minimized: minimized,
+                                           isKey: isKey, lastFocused: lastFocused, now: 500)
+        }
+        func window(_ id: String, pid: Int32, lastFocused: Double) -> WindowDescriptor {
+            var descriptor = WindowDescriptor(id: id, windowID: UInt32(pid), pid: pid, appName: "应用\(id)", bundleID: "app.\(id)", title: id, minimized: false, hidden: false,
+                                              onCurrentSpace: true, displayID: 1, aspectRatio: 1.6)
+            descriptor.lastFocused = lastFocused
+            return descriptor
+        }
+        let plain = entry(), id = SettingsWindowEntry.id
+        check(plain.settingsWindow && !plain.searchOnly && !plain.windowless && plain.frame == frame, "列表里的普通一项，不搜索也能看到")
+        check(plain.windowID == nil, "没有窗口编号，预览和窗口操作都不会碰它")
+        check(plain.lastFocused == 250 && entry(isKey: true).lastFocused == 500, "有键盘时算当前窗口，否则按上次使用的时间")
+        let a = window("a", pid: 10, lastFocused: 300), b = window("b", pid: 20, lastFocused: 200)
+        var settings = UserSettings.defaults
+        var profile = settings.shortcuts[0]
+        func ids(_ windows: [WindowDescriptor], front: Int32? = 10, display: UInt32? = 1, query: String = "") -> [String] {
+            WindowSearch.filtered(windows, settings: settings, profile: profile, frontPID: front, displayID: display, query: query).map(\.id)
+        }
+        check(ids([a, b, plain]) == ["a", id, "b"], "按最近使用的时间排在其他窗口之间")
+        check(ids([a, b, entry(isKey: true)], front: 99) == [id, "a", "b"], "设置窗口在前台时排第一，⌥Tab 回到最近的其他窗口")
+        profile.scope = .currentApp
+        check(ids([a, plain], front: 10) == ["a"] && ids([a, plain], front: 99) == [id], "“当前应用”只在一瞥自己在前台时列出它")
+        profile.scope = .otherApps
+        check(ids([a, plain], front: 99) == ["a"] && ids([a, plain], front: 10) == [id], "“其他应用”遵守同样的规则")
+        profile.scope = .all
+        profile.currentScreenOnly = true
+        check(ids([a, plain], display: 1) == ["a", id] && ids([a, plain], display: 2).isEmpty, "“只显示当前屏幕”也对它生效")
+        profile.currentScreenOnly = false
+        settings.showMinimized = false
+        check(ids([a, entry(minimized: true)]) == ["a"] && ids([a, plain]) == ["a", id], "不显示最小化窗口时，最小化的设置窗口也不显示")
+        settings.showMinimized = true
+        for query in ["设置", "shezhi", "glance", "settings"] {
+            check(WindowSearch.matches(plain, query: query), "搜索“\(query)”能找到设置窗口")
+        }
+        var page = WindowDescriptor(id: "launch:setting:page", windowID: nil, pid: 0, appName: "设置", bundleID: "page", title: "设置", minimized: false, hidden: false,
+                                    onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+        page.launcher = .setting
+        check(ids([page, plain], query: "设置").first == id, "搜索时已经打开的设置窗口排在同名的可打开项之前")
+    }
+    static func verifyWindowShortcuts() {
+        // The second screen is offset, and its size does not divide evenly.
+        let screens = [WindowRect(x: 0, y: 25, width: 1440, height: 875), WindowRect(x: 1440, y: 100, width: 1001, height: 601)]
+        let window = WindowRect(x: 1500, y: 150, width: 400, height: 300)
+        func frame(_ kind: WindowArrangement.Kind) -> WindowRect? { WindowArrangement.frame(kind, window: window, screens: screens) }
+        check(frame(.top) == WindowRect(x: 1440, y: 100, width: 1001, height: 300), "上半屏用窗口所在的屏幕，贴着可用区域的顶边")
+        check(frame(.bottom) == WindowRect(x: 1440, y: 401, width: 1001, height: 300), "下半屏贴着可用区域的底边")
+        check(frame(.topLeft) == WindowRect(x: 1440, y: 100, width: 500, height: 300), "左上四分之一")
+        check(frame(.topRight) == WindowRect(x: 1941, y: 100, width: 500, height: 300), "右上四分之一")
+        check(frame(.bottomLeft) == WindowRect(x: 1440, y: 401, width: 500, height: 300), "左下四分之一")
+        check(frame(.bottomRight) == WindowRect(x: 1941, y: 401, width: 500, height: 300), "右下四分之一")
+        check(frame(.leftThird) == WindowRect(x: 1440, y: 100, width: 333, height: 601), "左三分之一")
+        check(frame(.centerThird) == WindowRect(x: 1773, y: 100, width: 335, height: 601), "中间三分之一吃掉除不尽的部分，三块之间没有缝")
+        check(frame(.rightThird) == WindowRect(x: 2108, y: 100, width: 333, height: 601), "右三分之一")
+        check(frame(.center) == WindowRect(x: 1740, y: 250, width: 400, height: 300), "居中不改变窗口大小")
+        let oversized = WindowRect(x: 1500, y: 150, width: 3000, height: 2000)
+        check(WindowArrangement.frame(.center, window: oversized, screens: screens) == screens[1], "比屏幕大的窗口居中时缩到屏幕以内")
+        let commands = WindowLayoutCommand.allCases
+        let places: [(WindowLayoutCommand, WindowArrangement.Kind)] = [(.leftHalf, .left), (.rightHalf, .right), (.topHalf, .top), (.bottomHalf, .bottom),
+            (.topLeft, .topLeft), (.topRight, .topRight), (.bottomLeft, .bottomLeft), (.bottomRight, .bottomRight),
+            (.leftThird, .leftThird), (.centerThird, .centerThird), (.rightThird, .rightThird), (.maximize, .maximize), (.center, .center),
+            (.nextScreen, .nextScreen)]
+        check(places.allSatisfy { $0.0.kind == $0.1 } && places.count == commands.count - 1 && WindowLayoutCommand.restore.kind == nil, "每个命令对应正确的位置，还原不对应屏幕上的位置")
+        // Added after the others, so the fourteen that were there keep their hotkey slots.
+        check(commands.last == .nextScreen && WindowLayoutCommand.restore.slot == WindowLayoutCommand.firstSlot + 13, "移到下一块屏幕排在最后，原来的命令的快捷键位置不变")
+        let nextKey = WindowLayoutCommand.nextScreen.defaultHotkey
+        check(nextKey.keyCode == 124 && nextKey.modifiers == [.control, .option, .command] && nextKey.combinationKey != WindowLayoutCommand.rightHalf.defaultHotkey.combinationKey,
+              "移到下一块屏幕默认是 ⌃⌥⌘→，不和 ⌃⌥→ 的右半屏冲突")
+        check(WindowArrangement.frame(.nextScreen, window: window, screens: [screens[0]]) == nil, "只有一块屏幕时，移到下一块屏幕什么也不做")
+        check(commands.allSatisfy { !$0.label.isEmpty } && Set(commands.map(\.label)).count == commands.count, "每个命令有自己的名称")
+        check(commands.allSatisfy { WindowLayoutCommand(slot: $0.slot) == $0 } && Set(commands.map(\.slot)).count == commands.count, "快捷键位置和命令一一对应")
+        check(WindowLayoutCommand(slot: 0) == nil && WindowLayoutCommand(slot: 1) == nil && WindowLayoutCommand(slot: WindowLayoutCommand.firstSlot + commands.count) == nil, "菜单栏快捷键的位置不会被当成窗口命令")
+
+        // 还原
+        let start = WindowRect(x: 10, y: 40, width: 500, height: 400), left = WindowRect(x: 0, y: 25, width: 720, height: 875), right = WindowRect(x: 720, y: 25, width: 720, height: 875)
+        var memory = WindowFrameMemory()
+        check(memory.original(of: 7, owner: 100) == nil, "没有调整过的窗口没有可还原的位置")
+        memory.recordArrangement(of: 7, owner: 100, from: start, to: left)
+        check(memory.original(of: 7, owner: 100) == start, "第一次调整时记住原来的位置")
+        memory.recordArrangement(of: 7, owner: 100, from: left, to: right)
+        check(memory.original(of: 7, owner: 100) == start, "连续调整时，还原回到第一次调整之前")
+        memory.recordArrangement(of: 7, owner: 100, from: WindowRect(x: right.x + 2, y: right.y - 2, width: right.width, height: right.height - 1), to: left)
+        check(memory.original(of: 7, owner: 100) == start, "只差一两点不算手动移动过")
+        let dragged = WindowRect(x: 300, y: 300, width: 640, height: 480)
+        memory.recordArrangement(of: 7, owner: 100, from: dragged, to: right)
+        check(memory.original(of: 7, owner: 100) == dragged, "手动移动过之后，从新的位置重新开始记")
+        memory.forget(7)
+        check(memory.original(of: 7, owner: 100) == nil, "还原之后忘记这个位置")
+        var reused = WindowFrameMemory()
+        reused.recordArrangement(of: 9, owner: 100, from: start, to: left)
+        check(reused.original(of: 9, owner: 200) == nil, "窗口编号被其他进程的新窗口重用时，不把旧位置给它")
+        check(reused.original(of: 9, owner: 100) == start, "编号没有换主人时照常还原")
+        reused.recordArrangement(of: 9, owner: 200, from: left, to: right)
+        check(reused.original(of: 9, owner: 200) == left, "新窗口正好停在旧窗口调整后的位置时，也从自己的位置开始记")
+        let limit = UInt32(WindowFrameMemory.limit)
+        var crowded = WindowFrameMemory()
+        for id in 0..<limit { crowded.recordArrangement(of: id, owner: 100, from: start, to: left) }
+        crowded.recordArrangement(of: 0, owner: 100, from: left, to: right)
+        crowded.recordArrangement(of: limit, owner: 100, from: start, to: left)
+        check(crowded.original(of: 0, owner: 100) == start && crowded.original(of: 1, owner: 100) == nil && crowded.original(of: limit, owner: 100) == start, "记满之后忘记最久没调整的窗口")
+        check(WindowArrangement.restored(start, window: window, screens: screens) == start, "原来的屏幕还在时回到原来的位置")
+        let gone = WindowRect(x: 5000, y: 100, width: 800, height: 600)
+        check(WindowArrangement.restored(gone, window: window, screens: screens) == WindowRect(x: 1540, y: 100, width: 800, height: 600), "原来的屏幕不在了就居中，不把窗口放到看不见的地方")
+        check(WindowArrangement.restored(gone, window: window, screens: []) == gone, "读不到屏幕时不改动保存的位置")
+
+        // Settings
+        let defaults = WindowShortcutSettings()
+        check(!defaults.enabled && defaults.active.isEmpty, "默认关闭，不占用任何全局按键")
+        check(defaults.shortcuts.map(\.command) == commands && defaults.shortcuts.allSatisfy { $0.hotkey.enabled && $0.hotkey.isValid }, "每个命令都有可用的默认按键")
+        check(Set(defaults.shortcuts.map(\.hotkey.combinationKey)).count == commands.count, "默认按键彼此不同")
+        var settings = UserSettings.defaults
+        settings.windowShortcuts.enabled = true
+        settings.menuBar.toggleHotkey.enabled = true; settings.menuBar.showAllHotkey.enabled = true
+        check(settings.validationError() == nil && settings.windowShortcuts.active.count == commands.count, "打开后不和默认方案、菜单栏快捷键冲突")
+        var conflicted = UserSettings.defaults
+        conflicted.windowShortcuts.enabled = true
+        conflicted.windowShortcuts.shortcuts[0].hotkey = MenuBarHotkey(keyCode: 48, modifiers: .option, enabled: true)
+        check(conflicted.validationError() != nil, "和切换方案相同的按键不能生效")
+        conflicted.windowShortcuts.shortcuts[0].hotkey.enabled = false
+        check(conflicted.validationError() == nil && conflicted.windowShortcuts.active.count == commands.count - 1, "关掉这一项后不再冲突，也不再注册")
+        conflicted.windowShortcuts.shortcuts[0].hotkey.enabled = true; conflicted.windowShortcuts.enabled = false
+        check(conflicted.validationError() == nil, "总开关关闭时不占用按键，也不算冲突")
+        var doubled = UserSettings.defaults
+        doubled.windowShortcuts.enabled = true
+        doubled.windowShortcuts.shortcuts[1].hotkey = doubled.windowShortcuts.shortcuts[0].hotkey
+        check(doubled.validationError() != nil, "两个窗口命令不能用同一个按键")
+        for invalid in [MenuBarHotkey(keyCode: 0, modifiers: [], enabled: true), MenuBarHotkey(keyCode: 0, modifiers: .shift, enabled: true),
+                        MenuBarHotkey(keyCode: KeyChoice.modifierOnly, modifiers: .option, enabled: true)] {
+            var bad = UserSettings.defaults
+            bad.windowShortcuts.enabled = true
+            bad.windowShortcuts.shortcuts[0].hotkey = invalid
+            check(bad.validationError() != nil, "窗口快捷键不能占用普通打字按键，也不能只按修饰键")
+        }
+        var broken = UserSettings.defaults
+        broken.windowShortcuts.enabled = true
+        broken.windowShortcuts.shortcuts[2].hotkey = MenuBarHotkey(keyCode: 48, modifiers: .option, enabled: true)
+        broken.windowShortcuts.shortcuts[3].hotkey = MenuBarHotkey(keyCode: 0, modifiers: [], enabled: true)
+        let mended = broken.repaired()
+        check(mended.validationError() == nil && mended.windowShortcuts.enabled, "修复后设置有效，总开关不变")
+        check(!mended.windowShortcuts.shortcuts[2].hotkey.enabled && !mended.windowShortcuts.shortcuts[3].hotkey.enabled && mended.windowShortcuts.active.count == commands.count - 2, "修复时只关闭冲突或无效的那几项")
+
+        // Saved settings
+        var custom = WindowShortcutSettings()
+        custom.enabled = true
+        custom.shortcuts = [WindowShortcut(command: .center, hotkey: WindowLayoutCommand.leftHalf.defaultHotkey), WindowShortcut(command: .center, hotkey: .toggleDefault)]
+        let customData = try? JSONEncoder().encode(custom)
+        let decoded = customData.flatMap { try? JSONDecoder().decode(WindowShortcutSettings.self, from: $0) }
+        check(decoded?.enabled == true && decoded?.shortcuts.map(\.command) == commands, "读取时补上缺的命令、去掉重复的命令，顺序固定")
+        check(decoded?.shortcuts.first(where: { $0.command == .center })?.hotkey == WindowLayoutCommand.leftHalf.defaultHotkey, "保留保存的按键")
+        check(decoded?.shortcuts.first(where: { $0.command == .leftHalf })?.hotkey.enabled == false, "补上的命令的默认按键已被占用时先关闭")
+        check(decoded?.shortcuts.first(where: { $0.command == .rightHalf })?.hotkey == WindowLayoutCommand.rightHalf.defaultHotkey, "补上的其他命令用默认按键")
+        // Saved by 2.5.0 before this command was added: the fourteen others, one of them on ⌃⌥⌘→.
+        var earlier = WindowShortcutSettings()
+        earlier.enabled = true
+        earlier.shortcuts.removeAll { $0.command == .nextScreen }
+        let earlierData = try? JSONEncoder().encode(earlier)
+        let upgraded = earlierData.flatMap { try? JSONDecoder().decode(WindowShortcutSettings.self, from: $0) }
+        check(upgraded?.shortcuts.count == commands.count && upgraded?.shortcuts.last?.hotkey == WindowLayoutCommand.nextScreen.defaultHotkey && upgraded?.enabled == true,
+              "旧版保存的快捷键读进来时补上“移到下一块屏幕”，用默认按键")
+        earlier.shortcuts[0].hotkey = WindowLayoutCommand.nextScreen.defaultHotkey
+        let takenData = try? JSONEncoder().encode(earlier)
+        let taken = takenData.flatMap { try? JSONDecoder().decode(WindowShortcutSettings.self, from: $0) }
+        check(taken?.shortcuts.first(where: { $0.command == .nextScreen })?.hotkey.enabled == false && taken?.shortcuts.first?.hotkey.enabled == true,
+              "⌃⌥⌘→ 已经给了别的命令时，“移到下一块屏幕”先关闭，不抢走它")
+        let encoded = (try? JSONEncoder().encode(settings)) ?? Data()
+        check((try? JSONDecoder().decode(UserSettings.self, from: encoded))?.windowShortcuts == settings.windowShortcuts, "保存后读回来不变")
+        var object = ((try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any]) ?? [:]
+        func decodedSettings() -> UserSettings? {
+            (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? JSONDecoder().decode(UserSettings.self, from: $0) }
+        }
+        object.removeValue(forKey: "windowShortcuts")
+        check(decodedSettings()?.windowShortcuts == WindowShortcutSettings(), "旧版设置读进来时窗口快捷键保持关闭")
+        object["windowShortcuts"] = "坏值"
+        check(decodedSettings()?.windowShortcuts == WindowShortcutSettings() && decodedSettings()?.menuBar.toggleHotkey.enabled == true, "这一项损坏时不影响其他设置")
+        check(SettingSearchIndex.results("四分屏").first?.title == "启用全局窗口快捷键" && SettingSearchIndex.results("四分屏").first?.section == 1, "设置搜索可以找到全局窗口快捷键")
+        check(SettingSearchIndex.results("下一块屏幕").first?.title == "启用全局窗口快捷键", "设置搜索用“下一块屏幕”也能找到全局窗口快捷键")
     }
     static func verifyThreading() {
         // The key tap decides on its own thread, from what the main thread last published.
@@ -325,6 +1389,66 @@ struct CoreTests {
         var waits = 0
         while !thread.isFinished && waits < 500 { Thread.sleep(forTimeInterval: 0.01); waits += 1 }
         check(thread.isFinished, "结束后线程退出")
+    }
+    static func verifyStaleLists() {
+        // An app that misses a read's deadline answers late, perhaps after a newer read, perhaps during one.
+        var ledger = ScanLedger()
+        let firstRead = ledger.begin(), firstMark = ledger.mark
+        check(ledger.finish(read: firstRead, answered: [7], unanswered: [9], since: firstMark, running: [7, 9]).isEmpty, "没有迟到的回答时，这次读取的结果照常使用")
+        let secondRead = ledger.begin(), secondMark = ledger.mark
+        check(ledger.adoptLate(pid: 9, from: firstRead), "应用迟到的回答比列表里的旧内容新，可以采用")
+        check(ledger.finish(read: secondRead, answered: [7], unanswered: [9], since: secondMark, running: [7, 9]) == [9], "读取期间到达的迟到回答，不被这次读取手里的旧副本盖掉")
+        let thirdRead = ledger.begin(), thirdMark = ledger.mark
+        check(ledger.finish(read: thirdRead, answered: [7, 9], unanswered: [], since: thirdMark, running: [7, 9]).isEmpty, "应用按时回答时，用这次读到的内容")
+        check(!ledger.adoptLate(pid: 9, from: secondRead), "更早一次读取的迟到回答，不覆盖之后读到的内容")
+        check(!ledger.adoptLate(pid: 9, from: thirdRead), "已经按时回答的那次读取，不会再被当成迟到采用")
+        let fourthRead = ledger.begin()
+        check(ledger.adoptLate(pid: 9, from: fourthRead), "最新一次读取的迟到回答可以采用")
+        check(!ledger.adoptLate(pid: 9, from: fourthRead), "同一个回答不采用两次")
+        check(ledger.adoptLate(pid: 12, from: firstRead), "列表里从没有过的应用，迟到的回答总是可以采用")
+    }
+    static func verifyIdleWork() {
+        check(IdleRefreshPolicy.delay(sinceLast: 60, fullscreen: false) == 0.25, "平时窗口有变化后，很快重新读取列表")
+        check(abs(IdleRefreshPolicy.delay(sinceLast: 0.2, fullscreen: false) - 0.8) < 0.0001, "平时一秒内最多重新读取一次")
+        check(IdleRefreshPolicy.delay(sinceLast: 60, fullscreen: true) == 1, "前台全屏时，窗口有变化后等一秒再读取")
+        check(IdleRefreshPolicy.delay(sinceLast: 1, fullscreen: true) == 4, "前台全屏时，五秒内最多重新读取一次")
+
+        var asking = SharedRequests<String, Int>()
+        check(asking.join("safari", 1), "第一次问浏览器时发出请求")
+        check(!asking.join("safari", 2), "它还没回答时再问，不发出新的请求")
+        check(asking.join("chrome", 3), "别的浏览器各问各的")
+        check(asking.finish("safari") == [1, 2], "回答到达时，等它的每一方都收到")
+        check(asking.finish("safari").isEmpty, "回答送出后不再有人等")
+        check(asking.join("safari", 4), "回答之后再问，重新发出请求")
+
+        // A pin that waits for its app has no process behind it: it resolves the same without the running apps
+        // and without the window server's numbers, which is why neither is fetched for it.
+        let planned = WindowDescriptor(id: "cg:5", windowID: 5, pid: 40, appName: "备忘录", bundleID: "com.apple.Notes", title: "本周计划",
+                                       minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        var waitingPin = WindowPin(planned)
+        waitingPin.id = ""; waitingPin.windowID = nil; waitingPin.pid = 0
+        let unrelated = WindowDescriptor(id: "cg:8", windowID: 8, pid: 41, appName: "邮件", bundleID: "com.apple.mail", title: "收件箱",
+                                         minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        check(PinPolicy.resolve([waitingPin], windows: [unrelated], runningApps: [:], liveWindowIDs: []) == [waitingPin], "等待应用回来的置顶，不查正在运行的应用和窗口编号也照样等着")
+        let reopened = WindowDescriptor(id: "cg:12", windowID: 12, pid: 77, appName: "备忘录", bundleID: "com.apple.Notes", title: "本周计划",
+                                        minimized: false, hidden: false, onCurrentSpace: true, displayID: 1, aspectRatio: 1.5)
+        check(PinPolicy.resolve([waitingPin], windows: [unrelated, reopened], runningApps: [:], liveWindowIDs: []).map(\.id) == ["cg:12"], "应用重新打开后，等待的置顶同样认回它的窗口")
+    }
+    static func verifySearchCache() {
+        var cache = RecencyCache<Int, Int>(limit: 3)
+        var built = 0
+        func ask(_ key: Int) -> Int { cache.value(for: key) { built += 1; return key * 10 } }
+        for key in 1...6 { _ = ask(key) }
+        check(built == 6 && cache.count == 6, "索引缓存装得下上限的两倍")
+        for _ in 0..<3 { for key in 1...6 { _ = ask(key) } }
+        check(built == 6, "在两倍上限以内反复查同一批条目，不重算任何一项")
+        check(ask(4) == 40, "取回的是原来算好的值")
+        _ = ask(7)
+        check(cache.count == 3, "超过两倍上限时，一次丢掉最久没用的那一半")
+        _ = ask(6); _ = ask(4)
+        check(built == 7, "最近用过的条目留着")
+        _ = ask(1)
+        check(built == 8, "最久没用的条目丢掉了，再用时重新算")
     }
     static func verifyOptimizations() {
         check(QuickCommitPolicy.commitsNow(selectionUntouched: true, cacheAge: 3, cacheStale: false), "列表刚读过且没有新事件时，快速松键直接切换")
@@ -399,6 +1523,49 @@ struct CoreTests {
         check(salvaged?.advanced.commandLineEnabled == true && salvaged?.advanced.browserTabs == false, "分组里有损坏的值时，同组其他值保留")
         check(UserSettings.salvaged(from: Data("not json".utf8)) == nil, "不是 JSON 的内容无法恢复")
         check(UserSettings.salvaged(from: Data("{\"showHidden\":\"x\"}".utf8)) == nil, "没有任何可用的值时无法恢复")
+
+        // A choice or a list entry from a later version falls back alone: no notice, no defaults for the rest.
+        var custom = UserSettings.defaults
+        custom.exclusions = "com.example.kept"; custom.advanced.showDelay = 250
+        custom.shortcuts[1].currentScreenOnly = true; custom.windowShortcuts.enabled = true
+        var future = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(custom)) as! [String: Any]
+        future["style"] = "以后的样式"; future["theme"] = "以后的主题"
+        var futureAdvanced = future["advanced"] as! [String: Any]
+        for key in ["inputMode", "titleDisplay", "titleCut", "panelScreen", "followCursor", "gesture", "menuIcon"] { futureAdvanced[key] = "以后的选项" }
+        var futureBindings = futureAdvanced["bindings"] as! [[String: Any]]
+        futureBindings.append(["command": "以后的操作", "keyCode": 1])
+        futureAdvanced["bindings"] = futureBindings
+        var futureExceptions = futureAdvanced["exceptions"] as! [[String: Any]]
+        var strange = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(AppException())) as! [String: Any]
+        strange["hide"] = "以后的方式"; strange["bundleID"] = "com.example.later"
+        futureExceptions.append(strange)
+        futureAdvanced["exceptions"] = futureExceptions
+        future["advanced"] = futureAdvanced
+        var futureProfiles = future["shortcuts"] as! [[String: Any]]
+        for key in ["scope", "order", "release", "fullscreen", "grouping", "styleOverride"] { futureProfiles[0][key] = "以后的选项" }
+        future["shortcuts"] = futureProfiles
+        var futureWindowShortcuts = future["windowShortcuts"] as! [String: Any]
+        var futureList = futureWindowShortcuts["shortcuts"] as! [[String: Any]]
+        var unknownShortcut = futureList[0]
+        unknownShortcut["command"] = "以后的排列"
+        futureList.append(unknownShortcut)
+        futureWindowShortcuts["shortcuts"] = futureList
+        future["windowShortcuts"] = futureWindowShortcuts
+        let read = try? JSONDecoder().decode(UserSettings.self, from: JSONSerialization.data(withJSONObject: future))
+        check(read != nil, "有以后版本才认识的选项时，整份设置仍然读得出来")
+        check(read?.style == .thumbnails && read?.theme == .system, "不认识的样式和主题回到默认值")
+        check(read?.advanced.inputMode == .search && read?.advanced.menuIcon == .outline, "不认识的选项回到默认值")
+        check(read?.advanced.titleDisplay == .window && read?.advanced.gesture == .disabled, "每个选项各自回到默认值")
+        check(read?.exclusions == "com.example.kept" && read?.advanced.showDelay == 250, "其他设置保留")
+        check(read?.advanced.bindings == custom.advanced.bindings, "不认识的面板操作单独去掉，其余按键保留")
+        check(read?.advanced.exceptions == custom.advanced.exceptions, "读不出来的例外规则单独去掉，其余保留")
+        let firstProfile = read?.shortcuts.first
+        check(firstProfile?.scope == .all && firstProfile?.order == .recent && firstProfile?.grouping == .all, "方案里不认识的选项回到默认值")
+        check(firstProfile?.release == nil && firstProfile?.styleOverride == nil && firstProfile?.fullscreen == .show, "方案里可以不填的选项回到未设置")
+        check(firstProfile?.keyCode == custom.shortcuts[0].keyCode && firstProfile?.modifiers == custom.shortcuts[0].modifiers, "方案的快捷键保留")
+        check(read?.shortcuts.count == 9 && read?.shortcuts[1].currentScreenOnly == true, "其他方案不受影响")
+        check(read?.windowShortcuts.enabled == true && read?.windowShortcuts.shortcuts == custom.windowShortcuts.shortcuts, "不认识的窗口快捷键单独去掉，其余和开关保留")
+        check(read?.validationError() == nil, "这样读出来的设置有效")
 
         func pinWindow(_ id: String, _ windowID: UInt32?, pid: Int32, bundle: String = "com.apple.Safari", title: String) -> WindowDescriptor {
             WindowDescriptor(id: id, windowID: windowID, pid: pid, appName: "Safari", bundleID: bundle, title: title, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)

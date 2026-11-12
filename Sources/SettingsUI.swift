@@ -127,7 +127,7 @@ enum SettingsSection: Int, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .profiles: return "每个方案是一组快捷键，加上它要显示的窗口和排列方式。"
-        case .search: return "面板里的输入、搜索和按键。"
+        case .search: return "面板里的输入、搜索和按键，以及全局窗口快捷键。"
         case .appearance: return "卡片、预览、面板位置与动画。"
         case .pointer: return "Dock 预览、鼠标悬停、光标跟随与触控板手势。"
         case .menuBar: return "隐藏不常用的菜单栏图标，需要时再显示。"
@@ -160,6 +160,13 @@ final class SettingsModel: ObservableObject {
     var applyHandler: (UserSettings) -> Void = { _ in }
     var errorsHandler: () -> [String] = { [] }
     var beforeFirstApply: () -> Void = {}
+    var clearHabitsHandler: () -> Void = {}
+    var copyDiagnosticsHandler: () -> Bool = { false }
+    @Published var layouts: [LayoutSnapshot] = []
+    var saveLayoutHandler: () -> Void = {}
+    var restoreLayoutHandler: (UUID) -> Void = { _ in }
+    var renameLayoutHandler: (UUID) -> Void = { _ in }
+    var deleteLayoutHandler: (UUID) -> Void = { _ in }
     private var appliedThisSession = false
     private var pending: DispatchWorkItem?
     var draft: UserSettings {
@@ -472,11 +479,40 @@ struct SettingsView: View {
                 SettingsToggle("搜索优先显示名称直接匹配的窗口", isOn: $model.draft.advanced.searchRanking)
                 SettingsToggle("容忍英文或完整拼音的一处拼写错误", isOn: $model.draft.advanced.searchTypos)
                 SettingsNote("名称匹配优先于拼音、首字母和拼写容错；同等匹配优先最近使用的窗口。四个字符起支持一处错字、漏字、多字或相邻字母颠倒。")
+                Group {
+                    SettingsToggle("允许跳过中间的字", isOn: $model.draft.advanced.searchSkips)
+                    SettingsChoice("双拼方案", selection: $model.draft.advanced.shuangpin) {
+                        ForEach(ShuangpinScheme.allCases) { Text($0.label).tag($0) }
+                    }
+                    SettingsNote("多音字的每个读音都能搜到（chongqing 找到重庆），汉字、全拼和首字母可以混着输入（微xin、wxin 都找到微信）。跳字匹配排在最后：chrm 找到 Chrome，wjq 找到文件管理器。")
+                }
+                Group {
+                    SettingsToggle("把常选的结果排到前面", isOn: $model.draft.advanced.searchLearning)
+                    SettingsNote("同一个搜索连续选同一个结果两次后，它会排到最前面；改选别的结果，顺序也会跟着变。记录只保存在这台 Mac 上，包括输入的文字和选中的应用或设置页面，不包括窗口标题，也不随设置导出。")
+                    HStack(spacing: 8) {
+                        Button("清除搜索记录") { model.clearHabitsHandler(); model.note("已清除搜索记录。") }
+                        Spacer(minLength: 8)
+                    }
+                }
                 SettingsToggle("搜索时包含浏览器标签页", isOn: $model.draft.advanced.browserTabs)
-                SettingsNote("支持 Safari、Chrome、Edge、Brave 和 Vivaldi。只在搜索时读取正在运行的浏览器的标签页标题和网址，不读取网页内容；第一次使用时，macOS 会询问是否允许一瞥控制该浏览器。")
+                SettingsNote("支持 Safari、Chrome、Chrome Beta、Edge、Brave、Vivaldi、Opera 和 Arc，也支持提供相同脚本接口的其他 Chromium 浏览器，比如部分国产浏览器。只在搜索时读取正在运行的浏览器的标签页标题和网址，不读取网页内容；第一次使用时，macOS 会询问是否允许一瞥控制该浏览器。")
                 SettingsToggle("搜索时包含未打开的应用", isOn: $model.draft.advanced.searchApps)
                 SettingsToggle("搜索时包含系统设置页面", isOn: $model.draft.advanced.searchSettingsPages)
                 SettingsNote("像 Windows 的开始菜单一样：输入应用或设置的名称（中文、拼音或英文都可以），回车即可打开，例如“wx”打开微信、“蓝牙”打开蓝牙设置。匹配程度相同时排在已打开的窗口后面，每次最多列出 \(WindowSearch.launcherLimit) 项。")
+                Group {
+                    SettingsToggle("搜索时包含系统命令", isOn: $model.draft.advanced.searchCommands)
+                    SettingsToggle("搜索时查找文件", isOn: $model.draft.advanced.searchFiles)
+                    SettingsToggle("搜索时计算算式", isOn: $model.draft.advanced.searchCalculator)
+                    SettingsToggle("在结果最后提供网页搜索", isOn: $model.draft.advanced.searchWeb)
+                    if model.draft.advanced.searchWeb {
+                        SettingsChoice("搜索引擎", selection: $model.draft.advanced.webEngine) {
+                            ForEach(WebSearchEngine.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    SettingsNote("系统命令：锁定屏幕、睡眠、重新启动等，重启、关机、退出登录和清空废纸篓都会先确认。文件来自聚焦搜索，按文件名查你主目录里看得见的文件夹，不查“资源库”和隐藏文件夹，不记录；纯英文和数字至少输入三个字符。算式如 1+2*3，回车复制结果。网页搜索只在你选中这一行并回车时才交给默认浏览器，一瞥自己不联网；如果搜索没有其他结果，这一行就是唯一的结果，回车会打开它。")
+                    SettingsToggle("用开头的符号只看一类结果", isOn: $model.draft.advanced.searchPrefixes)
+                    SettingsNote("在搜索开头输入 > 只看系统命令和窗口布局（只输入 > 列出全部），= 只看计算结果，/ 只看文件，? 只看网页搜索。上面关掉的类别加了符号也不会出现。关掉这个开关后，这些符号当普通文字搜索。")
+                }
             }
             SettingsGroup("选择窗口") {
                 SettingsToggle("按 Shift 单独反向选择", isOn: $model.draft.advanced.shiftSelectsPrevious)
@@ -494,6 +530,37 @@ struct SettingsView: View {
                     }
                 }
                 SettingsNote("直接输入搜索模式中，普通文字按键用于搜索；这里录制的单键操作在传统模式中生效，带修饰键的组合在两种模式中都可用。停用一项操作也会停用它的 ⌘ 快捷键。")
+            }
+            SettingsGroup("全局窗口快捷键") {
+                SettingsToggle("启用全局窗口快捷键", isOn: $model.draft.windowShortcuts.enabled)
+                SettingsNote("不用打开面板，在任何应用里调整当前窗口的位置和大小，或把它移到下一块屏幕；面板打开时作用于选中的窗口。“还原”回到一瞥调整之前的位置。需要辅助功能权限，一瞥自己的窗口除外；没能调整时会发出提示音。")
+                if model.draft.windowShortcuts.enabled {
+                    ForEach($model.draft.windowShortcuts.shortcuts) { $shortcut in
+                        LabeledContent(shortcut.command.label) {
+                            HStack(spacing: 10) {
+                                KeyRecorder(code: $shortcut.hotkey.keyCode, modifiers: $shortcut.hotkey.modifiers, recordingChanged: recordingChanged, allowsModifierOnly: false).frame(width: 140)
+                                Toggle(shortcut.command.label, isOn: $shortcut.hotkey.enabled).labelsHidden().toggleStyle(.switch)
+                            }
+                        }
+                    }
+                }
+            }
+            SettingsGroup("窗口布局") {
+                SettingsNote("记下所有窗口现在的位置和大小，之后一次放回去。可以在这里恢复，也可以在搜索里输入布局的名称或“布局”，或者用菜单栏图标的右键菜单。")
+                ForEach(model.layouts) { layout in
+                    LabeledContent(layout.name) {
+                        HStack(spacing: 8) {
+                            Text("\(layout.windows.count) 个窗口").foregroundStyle(.secondary)
+                            Button("恢复") { model.restoreLayoutHandler(layout.id) }
+                            Button("重命名…") { model.renameLayoutHandler(layout.id) }
+                            Button("删除…") { model.deleteLayoutHandler(layout.id) }
+                        }
+                    }
+                }
+                Button("保存当前布局…") { model.saveLayoutHandler() }
+                SettingsToggle("接上或拔掉显示器后自动恢复布局", isOn: $model.draft.advanced.restoreLayoutOnScreenChange)
+                SettingsNote("显示器接上、拔掉，或者分辨率、排列改变后约两秒，如果有布局是在和现在一样的屏幕上保存的，就恢复它；有几个时用最近保存的那个，没有就什么都不做。只调整 Dock 或菜单栏不算。自动恢复不发出提示音，也不弹出提示。")
+                SettingsNote("恢复时，最小化的窗口和隐藏的应用会重新显示。没有打开的应用不会被打开，已关闭的窗口不会重新出现，全屏窗口不处理，也不恢复窗口的前后顺序。保存时会记下窗口标题，用来区分同一个应用的多个窗口；布局只存在这台 Mac 上，不随设置导出。")
             }
         }
     }
@@ -543,8 +610,10 @@ struct SettingsView: View {
                         ForEach([0, 150, 300, 500, 800], id: \.self) { Text($0 == 0 ? "立即" : "\($0) 毫秒").tag($0) }
                     }
                     SettingsToggle("包含最小化的窗口", isOn: $model.draft.dockPreview.includeMinimized)
+                    SettingsToggle("实时更新预览图", isOn: $model.draft.dockPreview.liveThumbnails)
+                    SettingsToggle("悬停时在窗口原来的位置显示它", isOn: $model.draft.dockPreview.peekWindow)
                 }
-                SettingsNote("像 Windows 任务栏一样：点按预览切换到那个窗口，悬停时点 × 关闭它；在 Dock 上左右移动可直接换到其他应用。需要辅助功能权限，预览图需要屏幕录制权限。")
+                SettingsNote("像 Windows 任务栏一样：点按预览切换到那个窗口，点 × 或按鼠标中键关闭它，右键可以最小化、隐藏或退出；在 Dock 上左右移动可直接换到其他应用。悬停时显示的是窗口的画面，不会移动真实窗口。需要辅助功能权限，预览图需要屏幕录制权限。")
             }
             SettingsGroup("鼠标") {
                 SettingsToggle("鼠标悬停时改变选中窗口", isOn: $model.draft.mouseHoverEnabled)
@@ -649,10 +718,22 @@ struct SettingsView: View {
                     do { if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
                     catch { model.note("无法设置自动启动：\(error.localizedDescription)", error: true); model.launchAtLogin = SMAppService.mainApp.status == .enabled }
                 }
+                SettingsToggle("意外退出后自动重新打开", isOn: $model.draft.advanced.restartAfterCrash)
+                SettingsNote("一瞥崩溃后约 2 秒重新打开；10 分钟内已重开 3 次后不再重开，并提示你。自己退出、强制退出或关机时不会重新打开。")
             }
             SettingsGroup("命令行") {
                 SettingsToggle("允许命令行列出和切换窗口", isOn: $model.draft.advanced.commandLineEnabled)
                 SettingsNote("开启后，本机上的任何程序都能通过 Glance --list 读到所有窗口标题并切换窗口，而不需要自己申请权限。不用命令行时建议保持关闭。")
+            }
+            SettingsGroup("诊断") {
+                HStack(spacing: 8) {
+                    Button("复制诊断信息") {
+                        if model.copyDiagnosticsHandler() { model.note("已复制诊断信息，可以直接粘贴。") }
+                        else { model.note("没能复制诊断信息。", error: true) }
+                    }
+                    Spacer(minLength: 8)
+                }
+                SettingsNote("遇到问题时，把它粘贴给开发者。里面是版本、权限状态、各项功能的开关，以及这次运行中的次数和耗时，没有窗口标题、应用名称和你输入过的内容。不需要打开上面的命令行开关。")
             }
             SettingsGroup("备份与迁移") {
                 HStack(spacing: 8) {

@@ -18,7 +18,7 @@ extension AppDelegate {
         dockPreview.storeImage = { [weak self] id, image in self?.state.storePreview(id, image: image) }
         dockPreview.isBlocked = { [weak self] in self?.showing ?? false }
         dockPreview.onFocus = { [weak self] handle in self?.focusFromDock(handle) }
-        dockPreview.onClose = { handle in WindowControl.perform(.close, on: handle) }
+        dockPreview.perform = { action, handle, done in WindowControl.performInBackground(action, on: handle, completion: done) }
         if let path = Self.argument(after: "--dock-preview-log") {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             try? Data().write(to: url)
@@ -27,12 +27,15 @@ extension AppDelegate {
     }
 
     func focusFromDock(_ handle: WindowHandle) {
-        if let error = WindowControl.perform(.focus, on: handle) {
-            NSSound.beep()
-            dockPreview.log?("focus failed: \(error)")
-            return
+        WindowControl.performInBackground(.focus, on: handle) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                NSSound.beep()
+                self.dockPreview.log?("focus failed: \(error)")
+                return
+            }
+            self.engine.markFocused(handle)
         }
-        engine.markFocused(handle)
     }
 
     static func argument(after flag: String) -> String? {
@@ -191,17 +194,19 @@ extension AppDelegate {
             let apps = entries.filter { $0.kind == .app }, pages = entries.filter { $0.kind == .setting }
             var report: [String: Any] = [
                 "apps": apps.count, "settingsPages": pages.count,
-                "appSamples": apps.prefix(60).map { "\($0.name)\($0.alias.map { " / \($0)" } ?? "") [\($0.bundleID)]" },
+                "appSamples": apps.prefix(300).map { "\($0.name)\($0.alias.map { " / \($0)" } ?? "") [\($0.bundleID)]" },
                 "settingsSamples": pages.map { "\($0.name)\($0.alias.map { " / \($0)" } ?? "") [\($0.bundleID)]" },
             ]
             let results = self.launcher.results(apps: true, settingsPages: true)
             var queries: [String: [String]] = [:]
-            for query in ["wx", "weixin", "wechat", "蓝牙", "bluetooth", "lanya", "wifi", "safari", "jsq", "terminal", "zd", "显示器", "lock screen", "date", "mouse"] {
+            for query in ["wx", "weixin", "wechat", "蓝牙", "bluetooth", "lanya", "wifi", "safari", "jsq", "jisuanqi", "terminal", "zd", "zhongduan", "显示器", "xsq", "lock screen", "date", "mouse"] {
                 queries[query] = WindowSearch.filtered(results.map(\.descriptor), settings: self.settings.value, profile: self.settings.value.shortcuts[0],
                                                        frontPID: nil, displayID: nil, query: query)
                     .prefix(5).map { "\($0.title) (\($0.launcher?.label ?? "窗口"))" }
             }
             report["queries"] = queries
+            report["safari"] = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari")?.path ?? "not found"
+            report["languages"] = Array(Locale.preferredLanguages.prefix(3))
             let extensions = "/System/Library/ExtensionKit/Extensions"
             let battery = ((try? FileManager.default.contentsOfDirectory(atPath: extensions)) ?? [])
                 .compactMap { Bundle(path: "\(extensions)/\($0)") }.first { $0.bundleIdentifier == "com.apple.Battery-Settings.extension" }

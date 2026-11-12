@@ -96,7 +96,7 @@ final class HotkeyRegistry {
             var reference: EventHotKeyRef?
             let result = RegisterEventHotKey(extra.hotkey.keyCode, carbonModifiers(extra.hotkey.modifiers), identifier, GetEventDispatcherTarget(), 0, &reference)
             if result == noErr, let reference { registered.append(reference) }
-            else { errors.append("菜单栏快捷键 \(extra.hotkey.label) 被系统或其他应用占用（\(result)）。") }
+            else { errors.append("\(extra.slot >= WindowLayoutCommand.firstSlot ? "窗口" : "菜单栏")快捷键 \(extra.hotkey.label) 被系统或其他应用占用（\(result)）。") }
         }
     }
     private func register(_ profile: ShortcutProfile, reverse: Bool) {

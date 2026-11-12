@@ -10,12 +10,20 @@ struct ZoomFrame {
 }
 
 final class SwitcherState: ObservableObject {
-    @Published var query = "" { didSet { guard query != oldValue else { return }; if !query.isEmpty { sticky = true }; refilter(reset: true) } }
+    @Published var query = "" { didSet { guard query != oldValue else { return }; if !query.isEmpty { sticky = true }; refilter(reset: true); onQueryChange?(query) } }
+    var onQueryChange: ((String) -> Void)?
+    /// Rows made from what was typed: a sum's answer, a web search.
+    var queryItems: ((String) -> [WindowHandle])?
+    var onRevealFile: ((String) -> Void)?
     @Published var searchVisible = false
     @Published var items: [WindowHandle] = []
     @Published var selectedIndex = 0 { didSet { if selectedIndex != oldValue { onSelectionChanged?() } } }
     @Published var hoveredID: String?
-    @Published var images: [String: NSImage] = [:]
+    /// Previews also arrive while the panel is closed, from background captures and from the Dock preview, and no
+    /// view shows them then. Only changes made while `previewsShown` is set are announced.
+    var images: [String: NSImage] = [:] { willSet { if previewsShown { objectWillChange.send() } } }
+    /// Follows the panel as it opens and closes. Opening announces once, for everything stored in between.
+    var previewsShown = true { didSet { if previewsShown && !oldValue { objectWillChange.send() } } }
     @Published var style: SwitcherStyle = .thumbnails
     /// Grid for the icon and list styles.
     @Published var layout = ThumbnailLayout(columns: 3, width: 230, height: 239)
@@ -37,6 +45,9 @@ final class SwitcherState: ObservableObject {
     var all: [WindowHandle] = []
     /// Browser tabs found for this search session; kept apart so window refreshes do not drop them.
     var extraItems: [WindowHandle] = []
+    /// 一瞥's own settings window while it is open; window refreshes replace `all`, which never includes it.
+    var ownItems: [WindowHandle] = []
+    var habits = SearchHabits()
     var pinnedIDs = Set<String>()
     /// When grouping by app, the app whose windows are currently expanded.
     var expandedApp: Int32?
@@ -62,10 +73,16 @@ final class SwitcherState: ObservableObject {
     var selected: WindowHandle? { items.indices.contains(selectedIndex) ? items[selectedIndex] : nil }
     var showsToolbar: Bool { sticky && !searchVisible }
     /// How the selected result matched, for the pill beside the search field.
+    /// Behind a mark such as ">", the pill says what the mark keeps rather than how one result matched.
     var matchLabel: String? {
-        guard searchVisible, !query.isEmpty, let selected else { return nil }
-        return WindowSearch.matchKind(selected.descriptor, query: query, allowTypos: settings.advanced.searchTypos)?.label
+        guard searchVisible, !query.isEmpty else { return nil }
+        if let prefix = searchPrefix { return prefix.label }
+        guard let selected else { return nil }
+        return WindowSearch.matchKind(selected.descriptor, query: query, allowTypos: settings.advanced.searchTypos, skips: settings.advanced.searchSkips, shuangpin: settings.advanced.shuangpin)?.label
     }
+    var searchPrefix: SearchPrefix? { SearchPrefix.split(query, enabled: settings.advanced.searchPrefixes).prefix }
+    /// What the names are matched against: the search without its mark.
+    var searchText: String { SearchPrefix.split(query, enabled: settings.advanced.searchPrefixes).rest }
     func isAtEnd(_ d: WindowDescriptor) -> Bool { WindowSearch.isAtEnd(d, settings: settings, profile: profile) }
     /// In the list style, a divider separates windows placed at the end (minimized, no window …).
     var atEndDividerIndex: Int? {
@@ -97,18 +114,22 @@ final class SwitcherState: ObservableObject {
     }
     func refilter(reset: Bool) {
         let start = ProcessInfo.processInfo.systemUptime
-        let source = all + extraItems
+        let source = all + ownItems + extraItems + (queryItems?(query) ?? [])
         let pinned = pinnedIDs
         let descriptors = WindowSearch.filtered(source.map { handle in
                 var descriptor = handle.descriptor; descriptor.pinned = pinned.contains(descriptor.id); return descriptor
             }, settings: settings, profile: profile, frontPID: frontPID, displayID: displayID, query: query,
-            cursorX: cursor.map { Double($0.x) }, cursorY: cursor.map { Double($0.y) }, expandedApp: expandedApp)
+            cursorX: cursor.map { Double($0.x) }, cursorY: cursor.map { Double($0.y) }, expandedApp: expandedApp,
+            learned: settings.advanced.searchLearning ? habits.scores(for: query, now: Date.timeIntervalSinceReferenceDate) : [:])
         let handles = Dictionary(source.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let previousID = selected?.id
         // Keep the filtered descriptor (pin and group count) with the handle that the card shows.
         items = descriptors.compactMap { descriptor in handles[descriptor.id].map { $0.with(descriptor) } }
         if reset { selectedIndex = 0 }
-        else if let previousID, let index = items.firstIndex(where: { $0.id == previousID }) { selectedIndex = index }
+        else if let previousID, let index = items.firstIndex(where: { $0.id == previousID }) {
+            // Results that arrive later, such as files, never take the selection: Return does what it showed a moment ago.
+            selectedIndex = index
+        }
         else { selectedIndex = min(selectedIndex, max(0, items.count - 1)) }
         if previousID != selected?.id { onSelectionChanged?() }
         onLayout?()
@@ -249,11 +270,11 @@ extension TitleCut {
 }
 
 /// Text with the characters a search matched marked in amber.
-private func highlighted(_ text: String, query: String) -> AttributedString {
+private func highlighted(_ text: String, query: String, advanced: AdvancedSettings) -> AttributedString {
     var result = AttributedString(text)
     guard !query.isEmpty else { return result }
     let characters = result.characters
-    for range in WindowSearch.highlights(in: text, query: query) where range.upperBound <= characters.count {
+    for range in WindowSearch.highlights(in: text, query: query, skips: advanced.searchSkips, shuangpin: advanced.shuangpin) where range.upperBound <= characters.count {
         let start = characters.index(characters.startIndex, offsetBy: range.lowerBound)
         let end = characters.index(characters.startIndex, offsetBy: range.upperBound)
         result[start..<end][AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] = GlanceDesign.highlight
@@ -358,12 +379,15 @@ private struct WindowActionsMenu: View {
     var body: some View {
         Group {
             if includeSwitch {
-                Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launcher != nil ? "打开" : "切换到窗口")) { state.selectWindow(item.id, commit: true) }
+                Button(item.descriptor.menuBarItem ? "打开菜单" : (item.descriptor.launchAction ?? "切换到窗口")) { state.selectWindow(item.id, commit: true) }
             }
-            if !item.descriptor.searchOnly {
+            if item.descriptor.launcher == .file, !item.descriptor.revealOnly, let path = item.descriptor.launchTarget {
+                Button("在访达中显示") { state.onRevealFile?(path) }
+            }
+            if !item.descriptor.searchOnly && !item.descriptor.settingsWindow {
                 Button(item.descriptor.pinned ? "取消置顶" : "置顶这个窗口") { state.onTogglePin?(item.id) }
             }
-            if !item.descriptor.windowless && !item.descriptor.searchOnly {
+            if !item.descriptor.windowless && !item.descriptor.searchOnly && !item.descriptor.settingsWindow {
                 Button(item.descriptor.minimized ? "还原窗口" : "最小化窗口") { state.actOnWindow(item.id, action: .minimize) }
                 Button(item.descriptor.fullscreen ? "退出全屏" : "进入全屏") { state.actOnWindow(item.id, action: .fullscreen) }
                 Button("关闭窗口") { state.actOnWindow(item.id, action: .close) }.disabled(item.tab != nil)
@@ -375,8 +399,9 @@ private struct WindowActionsMenu: View {
                 }
                 Divider()
             }
-            // A menu bar result may belong to a system process; app actions stay with real windows.
-            if !item.descriptor.menuBarItem && item.descriptor.launcher == nil {
+            // A menu bar result may belong to a system process, and the settings window's app is 一瞥 itself;
+            // app actions stay with other apps' real windows.
+            if !item.descriptor.menuBarItem && item.descriptor.launcher == nil && !item.descriptor.settingsWindow {
                 Button(item.descriptor.hidden ? "显示应用" : "隐藏应用") { state.actOnWindow(item.id, action: .hideApp) }
                 Button("退出 \(item.descriptor.appName)") { state.actOnWindow(item.id, action: .quitApp) }
             }
@@ -547,7 +572,8 @@ private struct PreviewImage: View {
     private var placeholder: String {
         if item.descriptor.browserTab { return item.descriptor.subtitle ?? "浏览器标签页" }
         if item.descriptor.menuBarItem { return "按 ↩ 打开它的菜单" }
-        if let kind = item.descriptor.launcher { return kind == .app ? "按 ↩ 打开这个应用" : "按 ↩ 打开这个设置页" }
+        if let hint = item.descriptor.launchHint { return hint }
+        if item.descriptor.settingsWindow { return "一瞥的设置窗口" }
         if item.descriptor.windowless { return "没有打开的窗口" }
         if item.descriptor.minimized { return "窗口已最小化" }
         return "暂时没有预览"
@@ -587,7 +613,7 @@ private struct ThumbnailCard: View {
             .modifier(WindowAccessibility(state: state, item: item))
             .help(item.descriptor.displayTitle)
             .overlay(alignment: .bottomTrailing) {
-                if state.settings.advanced.tileButtons && !item.descriptor.windowless && !item.descriptor.searchOnly && state.hoveredID == item.id {
+                if state.settings.advanced.tileButtons && !item.descriptor.windowless && !item.descriptor.searchOnly && !item.descriptor.settingsWindow && state.hoveredID == item.id {
                     TileButtons(state: state, item: item).padding(16)
                 }
             }
@@ -755,12 +781,12 @@ private struct BrowseToolbar: View {
                     Button { state.onAction?(.close) } label: { Image(systemName: "xmark") }
                         .help("关闭窗口（⌘W）").accessibilityLabel("关闭选中窗口")
                 }.buttonStyle(PanelIconButtonStyle())
-                    .disabled(!controlsAvailable || state.selected?.descriptor.windowless == true || state.selected?.descriptor.searchOnly == true)
+                    .disabled(!controlsAvailable || state.selected?.descriptor.windowless == true || state.selected?.descriptor.searchOnly == true || state.selected?.descriptor.settingsWindow == true)
                 if let selected = state.selected {
                     Menu { WindowActionsMenu(state: state, item: selected) } label: { Image(systemName: "ellipsis").font(.system(size: 13, weight: .medium)) }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).tint(Color.secondary).fixedSize().frame(width: 30, height: 28)
                         .help("更多操作").accessibilityLabel("选中窗口的更多操作")
-                        .disabled(!controlsAvailable)
+                        .disabled(!controlsAvailable || selected.descriptor.settingsWindow)
                 }
             }.padding(2).background(.quinary, in: Capsule(style: .continuous))
             HStack(spacing: 0) {
@@ -987,12 +1013,12 @@ private struct SearchRow: View {
             HStack(spacing: 12) {
                 BadgedIcon(icon: item.icon, size: 30, badge: state.badges[item.descriptor.pid])
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(highlighted(item.descriptor.displayTitle, query: state.query))
+                    Text(highlighted(item.descriptor.displayTitle, query: state.searchText, advanced: state.settings.advanced))
                         .font(.system(size: 14, weight: selected ? .bold : .semibold)).foregroundStyle(GlanceDesign.ink).lineLimit(1)
                     HStack(spacing: 0) {
                         // Something to open without an English name would repeat its title here.
                         let showsApp = !(item.descriptor.launcher != nil && item.descriptor.appName == item.descriptor.title)
-                        if showsApp { Text(highlighted(item.descriptor.appName, query: state.query)) }
+                        if showsApp { Text(highlighted(item.descriptor.appName, query: state.searchText, advanced: state.settings.advanced)) }
                         let rest = state.details(for: item.descriptor, includeApp: false)
                         if !rest.isEmpty { Text((showsApp ? " · " : "") + rest.joined(separator: " · ")) }
                     }.font(.system(size: 12)).foregroundStyle(GlanceDesign.secondary).lineLimit(1)
@@ -1024,8 +1050,8 @@ private struct SearchDetail: View {
                     Text(meta(item.descriptor)).font(.system(size: 12)).foregroundStyle(GlanceDesign.secondary).lineLimit(1)
                 }
                 HStack(spacing: 8) {
-                    // Apps to open and menu bar icons are not windows: they only have the one action.
-                    let opensSomething = item.descriptor.launcher != nil || item.descriptor.menuBarItem
+                    // Apps to open, menu bar icons and the settings window only have the one action.
+                    let opensSomething = item.descriptor.launcher != nil || item.descriptor.menuBarItem || item.descriptor.settingsWindow
                     if !opensSomething {
                         let windowActions = controlsAvailable && !item.descriptor.windowless && !item.descriptor.searchOnly
                         Button("最小化 ⌘M") { state.onAction?(.minimize) }.buttonStyle(GlanceButtonStyle(compact: true)).disabled(!windowActions)
@@ -1036,14 +1062,15 @@ private struct SearchDetail: View {
                     }
                     Spacer(minLength: 8)
                     // In the demo this closes the panel, like Return does.
-                    Button(item.descriptor.launcher != nil ? "打开 ↵" : (item.descriptor.menuBarItem ? "打开菜单 ↵" : "切换 ↵")) {
+                    Button(item.descriptor.launchAction.map { "\($0) ↵" } ?? (item.descriptor.menuBarItem ? "打开菜单 ↵" : "切换 ↵")) {
                         state.onSelect?(state.selectedIndex, true)
                     }.buttonStyle(GlanceButtonStyle(primary: true, compact: true))
                 }
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").font(.system(size: 30, weight: .light)).foregroundStyle(GlanceDesign.accentText)
-                    Text(state.query.isEmpty ? "输入后在这里预览窗口" : "没有找到匹配的窗口").font(.system(size: 13)).foregroundStyle(GlanceDesign.secondary)
+                    Text(state.query.isEmpty ? "输入后在这里预览窗口" : (state.searchPrefix.map { "\($0.label)：没有结果" } ?? "没有找到匹配的窗口"))
+                        .font(.system(size: 13)).foregroundStyle(GlanceDesign.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.padding(20)

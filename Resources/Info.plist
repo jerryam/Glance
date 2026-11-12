@@ -9,13 +9,13 @@
     <key>LSHasLocalizedDisplayName</key><true/>
     <key>CFBundleExecutable</key><string>Glance</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.4.0</string>
-    <key>CFBundleVersion</key><string>19</string>
+    <key>CFBundleShortVersionString</key><string>2.5.0</string>
+    <key>CFBundleVersion</key><string>20</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
-    <key>NSAppleEventsUsageDescription</key><string>开启“搜索时包含浏览器标签页”后，一瞥会列出并切换 Safari、Chrome 等浏览器的标签页，不读取网页内容。</string>
+    <key>NSAppleEventsUsageDescription</key><string>开启“搜索时包含浏览器标签页”后，一瞥会列出并切换 Safari、Chrome 等浏览器的标签页，不读取网页内容。从搜索运行重新启动、关机、退出登录或清空废纸篓时，也需要向系统和访达发送这些请求。</string>
     <key>NSHumanReadableCopyright</key><string>一瞥 · 为 Jethro 制作的个人窗口切换器</string>
 </dict></plist>

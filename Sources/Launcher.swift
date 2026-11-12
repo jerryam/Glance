@@ -1,7 +1,8 @@
 import AppKit
+import UniformTypeIdentifiers
 
-/// Something the search panel can open that is not a window: an installed app that is not running,
-/// or a page of System Settings. Read from disk in the background, so a search never waits for it.
+/// Something the search panel can open that is not a window: an installed app that is not running, a page of
+/// System Settings or a system command. Read from disk in the background, so a search never waits for it.
 struct LaunchEntry: Equatable {
     let kind: LaunchKind
     /// Shown as the title: the app's or page's name in the system language.
@@ -10,7 +11,102 @@ struct LaunchEntry: Equatable {
     let alias: String?
     let bundleID: String
     let url: URL
-    var id: String { "launch:\(kind == .app ? "app" : "setting"):\(bundleID)" }
+    /// More words it can be found by, which are not shown.
+    var keywords: String? = nil
+    var id: String { "launch:\(kind == .app ? "app" : (kind == .setting ? "setting" : "command")):\(bundleID)" }
+}
+
+/// The user's files whose names hold what was typed, from Spotlight, in the folders the home folder shows. It looks
+/// once for each pause in the typing and then stops, so nothing runs while the panel is closed.
+final class FileSearch {
+    private var query: NSMetadataQuery?
+    private var observers: [NSObjectProtocol] = []
+    private var pending: DispatchWorkItem?
+    /// The matching files that lie loose in the home folder, found when a search starts.
+    private var loose: [String] = []
+    /// The kind of each of them, by its path. Spotlight tells the kind of what it finds, and is not asked about these.
+    private var looseTypes: [String: String] = [:]
+    private(set) var results: [WindowHandle] = []
+    var onUpdate: (() -> Void)?
+
+    func search(_ text: String) {
+        pending?.cancel(); pending = nil
+        let tokens = FileSearchPolicy.tokens(text)
+        guard !tokens.isEmpty else {
+            stop()
+            if !results.isEmpty { results = []; onUpdate?() }
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in self?.start(tokens) }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+    func cancel() {
+        pending?.cancel(); pending = nil
+        stop()
+        results = []
+    }
+    private func stop() {
+        query?.stop(); query = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
+    }
+    private func start(_ tokens: [String]) {
+        stop()
+        // Only the folders the home folder shows. Library alone holds most of the names on a Mac, nearly all of them
+        // files that apps keep for themselves: searched, they crowd out everything else.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let entries = (try? FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
+        var folders: [String] = [], files: [String] = []
+        for entry in entries {
+            let isFolder = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            if isFolder { folders.append(entry.lastPathComponent) } else { files.append(entry.lastPathComponent) }
+        }
+        loose = FileSearchPolicy.loose(files, tokens: tokens).map { home.appendingPathComponent($0).path }
+        looseTypes = [:]
+        for path in loose { looseTypes[path] = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.contentTypeKey]))?.contentType?.identifier }
+        let scopes: [Any] = FileSearchPolicy.folders(folders).map { home.appendingPathComponent($0, isDirectory: true) }
+        let search = NSMetadataQuery()
+        search.searchScopes = scopes.isEmpty ? [NSMetadataQueryUserHomeScope as Any] : scopes
+        search.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: tokens.map { NSPredicate(format: "%K LIKE[cd] %@", NSMetadataItemFSNameKey, "*\($0)*") })
+        search.sortDescriptors = [NSSortDescriptor(key: NSMetadataItemFSContentChangeDateKey, ascending: false)]
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: search, queue: .main) { [weak self, weak search] _ in
+                if let search { self?.finish(search) }
+            },
+            // A word in a great many names: the first of them are enough, and the rest need not be gathered.
+            center.addObserver(forName: .NSMetadataQueryGatheringProgress, object: search, queue: .main) { [weak self, weak search] _ in
+                if let search, search.resultCount >= FileSearchPolicy.looked { self?.finish(search) }
+            },
+        ]
+        query = search
+        if !search.start() { stop() }
+    }
+    private func finish(_ search: NSMetadataQuery) {
+        guard search === query else { return }
+        search.disableUpdates()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var types: [String: String] = [:]
+        let found = FileSearchPolicy.pick(from: search.resultCount, home: home, first: loose) { index in
+            guard let item = search.result(at: index) as? NSMetadataItem, let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { return nil }
+            types[path] = item.value(forAttribute: NSMetadataItemContentTypeKey) as? String
+            return path
+        }
+        stop()
+        results = found.map { path in
+            var descriptor = WindowDescriptor(id: "file:\(path)", windowID: nil, pid: 0, appName: FileSearchPolicy.place(of: path, home: home), bundleID: "",
+                                              title: (path as NSString).lastPathComponent, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
+            descriptor.launcher = .file
+            descriptor.launchTarget = path
+            // By the kind of file, so that listing a result never touches anything inside Documents or Desktop.
+            let kind = (types[path] ?? looseTypes[path]).flatMap { UTType($0) } ?? UTType(filenameExtension: (path as NSString).pathExtension) ?? .data
+            descriptor.revealOnly = FileSearchPolicy.runsWhenOpened(name: descriptor.title, types: Set([kind.identifier] + kind.supertypes.map { $0.identifier }))
+            let icon = NSWorkspace.shared.icon(for: kind)
+            return WindowHandle(descriptor: descriptor, ax: nil, icon: icon)
+        }
+        onUpdate?()
+    }
 }
 
 final class LaunchCatalog {
@@ -28,7 +124,7 @@ final class LaunchCatalog {
         guard !loading, force || now - loadedAt > 600 else { return }
         loading = true
         queue.async { [weak self] in
-            let found = Self.scanApps() + Self.scanSettingsPages()
+            let found = Self.scanApps() + Self.scanSettingsPages() + Self.commands()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
@@ -38,20 +134,28 @@ final class LaunchCatalog {
         }
     }
 
-    /// Search results for apps that are not running and for settings pages.
-    func results(apps: Bool, settingsPages: Bool) -> [WindowHandle] {
+    /// Search results for apps that are not running, for settings pages and for system commands.
+    func results(apps: Bool, settingsPages: Bool, commands: Bool = false) -> [WindowHandle] {
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         return entries.filter { entry in
-            entry.kind == .app ? apps && !running.contains(entry.bundleID) : settingsPages
+            switch entry.kind {
+            case .app: return apps && !running.contains(entry.bundleID)
+            case .setting: return settingsPages
+            case .command: return commands
+            default: return false
+            }
         }.map { entry in
             var descriptor = WindowDescriptor(id: entry.id, windowID: nil, pid: 0, appName: entry.alias ?? entry.name, bundleID: entry.bundleID,
                                               title: entry.name, minimized: false, hidden: false, onCurrentSpace: true, displayID: nil, aspectRatio: 1.6)
             descriptor.launcher = entry.kind
+            descriptor.subtitle = entry.keywords
             return WindowHandle(descriptor: descriptor, ax: nil, icon: icon(for: entry))
         }
     }
 
     private func icon(for entry: LaunchEntry) -> NSImage {
+        if entry.kind == .command, let symbol = SystemCommand(rawValue: entry.bundleID)?.symbol,
+           let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) { return image }
         let path = entry.kind == .app ? entry.url.path : Self.settingsAppPath
         if let cached = icons[path] { return cached }
         let image = NSWorkspace.shared.icon(forFile: path)
@@ -70,8 +174,17 @@ final class LaunchCatalog {
             NSWorkspace.shared.openApplication(at: entry.url, configuration: configuration)
         case .setting:
             NSWorkspace.shared.open(entry.url)
+        default:
+            return false
         }
         return true
+    }
+
+    private static func commands() -> [LaunchEntry] {
+        SystemCommand.allCases.map { command in
+            LaunchEntry(kind: .command, name: command.title, alias: command.english, bundleID: command.rawValue,
+                        url: URL(fileURLWithPath: "/"), keywords: command.keywords)
+        }
     }
 
     // MARK: Reading the disk
@@ -109,6 +222,8 @@ final class LaunchCatalog {
                 }
             }
         }
+        // Safari is on a system volume of its own, in none of the folders above. Launch Services knows where.
+        if let safari = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") { consider(safari) }
         return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 

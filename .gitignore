@@ -2,6 +2,7 @@
 Glance.app/
 build.log
 ui-snapshots/
+search-benchmark.json
 menubar-probe.json
 menubar-selftest.json
 Resources/AppIcon.icns

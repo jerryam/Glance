@@ -162,21 +162,23 @@ struct ShortcutProfile: Codable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id); enabled = try c.decode(Bool.self, forKey: .enabled)
         keyCode = try c.decode(UInt32.self, forKey: .keyCode); modifiers = try c.decode(ShortcutModifiers.self, forKey: .modifiers)
-        scope = try c.decode(WindowScope.self, forKey: .scope)
+        // Read with `try?`, here and below: a choice this version does not know, saved by a later one, falls back
+        // alone. Thrown, it would make the whole configuration unreadable.
+        scope = (try? c.decode(WindowScope.self, forKey: .scope)) ?? .all
         currentSpaceOnly = try c.decodeIfPresent(Bool.self, forKey: .currentSpaceOnly) ?? false
         currentScreenOnly = try c.decodeIfPresent(Bool.self, forKey: .currentScreenOnly) ?? false
         keepOpen = try c.decodeIfPresent(Bool.self, forKey: .keepOpen) ?? false
-        release = try c.decodeIfPresent(ReleaseBehavior.self, forKey: .release)
-        spaces = try c.decodeIfPresent(SpaceScope.self, forKey: .spaces)
-        minimized = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .minimized)
-        hidden = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .hidden)
-        fullscreen = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .fullscreen) ?? .show
-        windowless = try c.decodeIfPresent(VisibilityPolicy.self, forKey: .windowless)
-        order = try c.decodeIfPresent(WindowOrder.self, forKey: .order) ?? .recent
-        grouping = try c.decodeIfPresent(WindowGrouping.self, forKey: .grouping) ?? .all
+        release = try? c.decodeIfPresent(ReleaseBehavior.self, forKey: .release)
+        spaces = try? c.decodeIfPresent(SpaceScope.self, forKey: .spaces)
+        minimized = try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .minimized)
+        hidden = try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .hidden)
+        fullscreen = (try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .fullscreen)) ?? .show
+        windowless = try? c.decodeIfPresent(VisibilityPolicy.self, forKey: .windowless)
+        order = (try? c.decodeIfPresent(WindowOrder.self, forKey: .order)) ?? .recent
+        grouping = (try? c.decodeIfPresent(WindowGrouping.self, forKey: .grouping)) ?? .all
         separateTabs = try c.decodeIfPresent(Bool.self, forKey: .separateTabs) ?? false
-        styleOverride = try c.decodeIfPresent(SwitcherStyle.self, forKey: .styleOverride)
-        themeOverride = try c.decodeIfPresent(ThemeChoice.self, forKey: .themeOverride)
+        styleOverride = try? c.decodeIfPresent(SwitcherStyle.self, forKey: .styleOverride)
+        themeOverride = try? c.decodeIfPresent(ThemeChoice.self, forKey: .themeOverride)
         widthOverride = try c.decodeIfPresent(Double.self, forKey: .widthOverride)
         adaptiveOverride = try c.decodeIfPresent(Bool.self, forKey: .adaptiveOverride)
         previewOverride = try c.decodeIfPresent(Bool.self, forKey: .previewOverride)
@@ -214,17 +216,20 @@ struct UserSettings: Codable, Equatable {
     var advanced = AdvancedSettings()
     var menuBar = MenuBarSettings()
     var dockPreview = DockPreviewSettings()
+    var windowShortcuts = WindowShortcutSettings()
     static let defaults = UserSettings()
 
     init() {}
     private enum CodingKeys: String, CodingKey {
         case style, theme, adaptiveThumbnails, thumbnailWidth, showMinimized, showHidden, livePreviews
-        case mouseHoverEnabled, showWindowlessApps, exclusions, shortcuts, advanced, menuBar, dockPreview
+        case mouseHoverEnabled, showWindowlessApps, exclusions, shortcuts, advanced, menuBar, dockPreview, windowShortcuts
     }
+    /// The revision as it was saved, read on its own: `advanced` raises it to the current one as it is read.
+    private struct SavedRevision: Decodable { let preferencesRevision: Int? }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        style = try values.decodeIfPresent(SwitcherStyle.self, forKey: .style) ?? .thumbnails
-        theme = try values.decodeIfPresent(ThemeChoice.self, forKey: .theme) ?? .system
+        style = (try? values.decodeIfPresent(SwitcherStyle.self, forKey: .style)) ?? .thumbnails
+        theme = (try? values.decodeIfPresent(ThemeChoice.self, forKey: .theme)) ?? .system
         adaptiveThumbnails = try values.decodeIfPresent(Bool.self, forKey: .adaptiveThumbnails) ?? true
         thumbnailWidth = try values.decodeIfPresent(Double.self, forKey: .thumbnailWidth) ?? 230
         showMinimized = try values.decodeIfPresent(Bool.self, forKey: .showMinimized) ?? true
@@ -237,6 +242,11 @@ struct UserSettings: Codable, Equatable {
         advanced = try values.decodeIfPresent(AdvancedSettings.self, forKey: .advanced) ?? AdvancedSettings()
         menuBar = (try? values.decodeIfPresent(MenuBarSettings.self, forKey: .menuBar)) ?? MenuBarSettings()
         dockPreview = (try? values.decodeIfPresent(DockPreviewSettings.self, forKey: .dockPreview)) ?? DockPreviewSettings()
+        // Like file and web search in `advanced`: on from the start in the 2.5.0 test build, off from revision 3, and
+        // what was saved before that is turned off with them.
+        let revision = (try? values.decodeIfPresent(SavedRevision.self, forKey: .advanced))?.preferencesRevision ?? 0
+        if revision < 3 { dockPreview.liveThumbnails = false; dockPreview.peekWindow = false }
+        windowShortcuts = (try? values.decodeIfPresent(WindowShortcutSettings.self, forKey: .windowShortcuts)) ?? WindowShortcutSettings()
     }
 
     func validationError() -> String? {
@@ -262,6 +272,10 @@ struct UserSettings: Codable, Equatable {
         for hotkey in menuBar.enabledHotkeys {
             guard hotkey.isValid else { return "菜单栏快捷键 \(hotkey.label) 需要包含 ⌥、⌃ 或 ⌘，并且不能只按修饰键。" }
             guard combinations.insert(hotkey.combinationKey).inserted else { return "菜单栏快捷键 \(hotkey.label) 与其他快捷键重复。" }
+        }
+        for shortcut in windowShortcuts.active {
+            guard shortcut.hotkey.isValid else { return "窗口快捷键 \(shortcut.hotkey.label) 需要包含 ⌥、⌃ 或 ⌘，并且不能只按修饰键。" }
+            guard combinations.insert(shortcut.hotkey.combinationKey).inserted else { return "窗口快捷键 \(shortcut.hotkey.label) 与其他快捷键重复。" }
         }
         var panelKeys = Set<String>()
         guard Set(advanced.bindings.map(\.command)).count == advanced.bindings.count else { return "面板操作不能重复配置。" }
@@ -307,6 +321,12 @@ struct UserSettings: Codable, Equatable {
         for keyPath in [\MenuBarSettings.toggleHotkey, \MenuBarSettings.showAllHotkey] where result.menuBar[keyPath: keyPath].enabled {
             let hotkey = result.menuBar[keyPath: keyPath]
             if !hotkey.isValid || !combinations.insert(hotkey.combinationKey).inserted { result.menuBar[keyPath: keyPath].enabled = false }
+        }
+        if result.windowShortcuts.enabled {
+            for index in result.windowShortcuts.shortcuts.indices where result.windowShortcuts.shortcuts[index].hotkey.enabled {
+                let hotkey = result.windowShortcuts.shortcuts[index].hotkey
+                if !hotkey.isValid || !combinations.insert(hotkey.combinationKey).inserted { result.windowShortcuts.shortcuts[index].hotkey.enabled = false }
+            }
         }
         var commands = Set<PanelCommand>()
         result.advanced.bindings = result.advanced.bindings.filter { commands.insert($0.command).inserted }
@@ -403,10 +423,61 @@ struct SettingsArchive: Codable {
 }
 
 /// What a search result opens when it is not a window.
-enum LaunchKind: Equatable {
-    case app, setting
-    var label: String { self == .app ? "未打开的应用" : "系统设置" }
-    var symbol: String { self == .app ? "arrow.up.forward.app" : "gearshape" }
+enum LaunchKind: Equatable, CaseIterable {
+    case app, setting, command, file, calculation, web, layout
+    var label: String {
+        switch self {
+        case .app: return "未打开的应用"
+        case .setting: return "系统设置"
+        case .command: return "系统命令"
+        case .file: return "文件"
+        case .calculation: return "计算结果"
+        case .web: return "用浏览器打开"
+        case .layout: return "窗口布局"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .app: return "arrow.up.forward.app"
+        case .setting: return "gearshape"
+        case .command: return "power"
+        case .file: return "doc"
+        case .calculation: return "equal.circle"
+        case .web: return "globe"
+        case .layout: return "rectangle.3.group"
+        }
+    }
+    /// What Return does, on a button.
+    var action: String {
+        switch self {
+        case .calculation: return "复制"
+        case .command, .layout: return "执行"
+        case .app, .setting, .file, .web: return "打开"
+        }
+    }
+    /// What Return does, in a sentence.
+    var hint: String {
+        switch self {
+        case .app: return "按 ↩ 打开这个应用"
+        case .setting: return "按 ↩ 打开这个设置页"
+        case .command: return "按 ↩ 执行这个命令"
+        case .file: return "按 ↩ 打开这个文件"
+        case .calculation: return "按 ↩ 复制结果"
+        case .web: return "按 ↩ 用默认浏览器打开"
+        case .layout: return "按 ↩ 保存或恢复窗口布局"
+        }
+    }
+    /// Made from what was typed, so there is nothing to match the typing against.
+    var madeFromQuery: Bool { self == .calculation || self == .web }
+    /// Its place among the results: a sum first, what comes from the disk or the web after the rest.
+    var place: Int {
+        switch self {
+        case .calculation: return 0
+        case .app, .setting, .command, .layout: return 1
+        case .file: return 2
+        case .web: return 3
+        }
+    }
 }
 
 struct WindowDescriptor: Identifiable, Equatable {
@@ -441,8 +512,17 @@ struct WindowDescriptor: Identifiable, Equatable {
     var launcher: LaunchKind? = nil
     /// Not a window: a browser tab, a menu bar icon or something to open, which only join a search.
     var searchOnly: Bool { browserTab || menuBarItem || launcher != nil }
+    /// 一瞥's own settings window: listed like a window, but the only thing to do with it is go to it.
+    var settingsWindow = false
     /// Secondary text, such as a tab's web address.
     var subtitle: String? = nil
+    /// What a result made from the search opens or copies: a file's path, a web address, the answer to a sum.
+    var launchTarget: String? = nil
+    /// A file that opening would run: a program or a script. ↩ shows it in Finder instead.
+    var revealOnly = false
+    /// What ↩ does to a result that is not a window: for a button, and as a sentence.
+    var launchAction: String? { revealOnly ? "在访达中显示" : launcher?.action }
+    var launchHint: String? { revealOnly ? "程序和脚本不直接运行：按 ↩ 在访达中显示" : launcher?.hint }
     var pinned = false
     /// Number of windows folded into this entry when grouping by app.
     var groupCount = 0

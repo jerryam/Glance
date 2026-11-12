@@ -27,20 +27,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusMenu = NSMenu()
     let menuBar = MenuBarController()
     let launcher = LaunchCatalog()
+    let fileSearch = FileSearch()
     let dockPreview = DockPreviewController()
+    /// "已复制 …" after the panel closes on a calculation.
+    let notice = TransientNotice()
     let frontFullscreen = FrontFullscreenWatch()
     var browserTabs = BrowserTabCache<WindowHandle>()
     var panel: SwitcherPanel!
     var previewPanel: PreviewPanel?
     var settingsWindow: NSWindow?
     var settingsModel: SettingsModel?
+    var layouts: [LayoutSnapshot] = []
+    /// Counts only: how many windows the last restore placed, of how many.
+    var layoutResult = ""
+    /// The displays as last seen whole, to tell a change of display from one of the Dock or the menu bar.
+    var knownDisplays: [WindowRect] = []
+    var displayChangeWork: DispatchWorkItem?
+    /// Layouts put back by themselves after the displays changed, since launch.
+    var automaticLayoutRestores = 0
+    let layoutsMenu = NSMenu()
     var settingsViewLoaded = false
+    /// Reopenings after a crash within the policy's window, and whether they have just gone over its limit.
+    var crashRestarts: [Double] = []
+    var crashRestartStopped = false
     var loadNoticeShown = false
     var localMonitor: Any?
     var globalMonitor: Any?
     var panelClickMonitor: Any?
     var quickCommitCount = 0
     var waitedCommitCount = 0
+    /// Why the last global window shortcut did nothing; empty when it worked.
+    var windowShortcutError = ""
     var previewTimer: Timer?
     var backgroundTimer: Timer?
     var panelRefreshTimer: Timer?
@@ -53,6 +70,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var cachedPickID: String?
     var settingsSetAside = false
     var settingsWasKey = false
+    /// When the settings window last gained the keyboard: its place in the recent order, as for any other window.
+    var settingsLastFocused: TimeInterval = 0
     var supportObservers: [NSObjectProtocol] = []
     var previousModifiers: ShortcutModifiers = []
     var modifierRepeat: Timer?
@@ -69,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var gestureActive = false
     var recording = false
     var commandServer: WindowCommandServer?
-    var showing = false
+    var showing = false { didSet { if showing != oldValue { state.previewsShown = showing } } }
     var showGeneration = 0
     var pendingCommit = false
     var pendingFocusID: String?
@@ -105,7 +124,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.animationBehavior = .utilityWindow
         panel.contentView = materialView(NSHostingView(rootView: SwitcherView(state: state).frame(maxWidth: .infinity, maxHeight: .infinity)))
+        notice.background = { [weak self] hosting, frame in
+            self?.materialView(hosting, frame: frame, radius: TransientNoticeView.height / 2) ?? hosting
+        }
         loadPins()
+        engine.restoreRecentOrder()
+        loadSearchHabits()
+        loadLayouts()
         state.onSelect = { [weak self] index, commit in
             guard let self else { return }
             self.state.selectedIndex = index
@@ -149,19 +174,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         hotkeys.onTrigger = { [weak self] index, reverse in self?.trigger(index: index, reverse: reverse) }
         hotkeys.onRelease = { [weak self] in self?.modifiersChanged(Self.logicalModifierFlags) }
-        hotkeys.onExtra = { [weak self] slot in self?.menuBar.toggle(all: slot == 1) }
+        hotkeys.onExtra = { [weak self] slot in
+            if let command = WindowLayoutCommand(slot: slot) { self?.performWindowShortcut(command) }
+            else { self?.menuBar.toggle(all: slot == 1) }
+        }
         launcher.onUpdate = { [weak self] in self?.updateExtraItems() }
+        fileSearch.onUpdate = { [weak self] in self?.updateExtraItems() }
+        state.queryItems = { [weak self] query in self?.queryItems(for: query) ?? [] }
+        state.onQueryChange = { [weak self] query in self?.queryChanged(query) }
+        state.onRevealFile = { [weak self] path in
+            self?.dismiss()
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        }
         launcher.refreshIfNeeded()
         setupDockPreview()
+        state.previewsShown = showing
         menuBar.onRevealChange = { [weak self] in self?.updateStatusButton() }
         menuBar.onPointerMoved = { [weak self] in self?.frontFullscreen.lookIfDue() }
         frontFullscreen.onChange = { [weak self] in
             guard let self else { return }
             self.menuBar.pausedForFullscreen = self.frontFullscreen.active
             self.syncActivityTimers()
+            // Out of full screen: a read of the windows that was waiting the longer time need not wait any more.
+            if !self.frontFullscreen.active, self.idleRefresh != nil { self.scheduleIdleRefresh() }
             // A read that timed out said "not full screen", and the "ignore when full screen" rule goes by the last read.
             self.engine.refreshObservers()
         }
+        frontFullscreen.recentWindowFullscreen = { [weak self] pid in self?.engine.recentFullscreen(of: pid) }
         frontFullscreen.look()
         panelInput.currentState = { [weak self] in
             guard let self else { return PanelKeySnapshot() }
@@ -184,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         engine.onTitlesChange = { [weak self] changes in self?.updateTitles(changes) }
         gestures.onGesture = { [weak self] result in self?.handleGesture(result) ?? false }
         settings.onChange = { [weak self] in self?.applySettings() }
+        noteCrashRestart()
         applySettings()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self else { return event }
@@ -206,10 +246,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.stopActivityTimers(); self?.syncActivityTimers()
         })
         supportObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }; self.sleeping = true; if self.showing { self.dismiss() }; self.stopActivityTimers(); self.capture.cancel()
+            guard let self else { return }; self.sleeping = true; if self.showing { self.dismiss() }; self.stopActivityTimers(); self.capture.cancel(); self.engine.saveRecentOrder()
         })
         supportObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }; self.sleeping = false; self.engine.refreshObservers(); self.updateHotkeyGate(); self.syncActivityTimers()
+        })
+        knownDisplays = Self.displayFrames()
+        supportObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.displaysMayHaveChanged()
         })
         syncActivityTimers()
         if AXIsProcessTrusted() { engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in self?.syncPins(handles) } }
@@ -244,6 +288,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // A crash on the way out does not need undoing.
+        CrashRestart.disarm()
+        engine.saveRecentOrder()
         // Every hidden menu bar icon comes back (macOS also ends the request with the process).
         menuBar.releaseAll()
         // The system ⌘Tab state outlives this process; always hand it back.
@@ -363,15 +410,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !showing, !sleeping, AXIsProcessTrusted() else { return }
         idleRefresh?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.showing, !self.sleeping else { return }
+            guard let self else { return }
+            self.idleRefresh = nil
+            guard !self.showing, !self.sleeping else { return }
             self.idleRefreshedAt = ProcessInfo.processInfo.systemUptime
             self.idleRefreshCount += 1
             self.engine.refresh(frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) { [weak self] handles in self?.syncPins(handles) }
         }
         idleRefresh = work
-        // Soon after the event, but at most once a second for an app that keeps opening windows.
         let sinceLast = ProcessInfo.processInfo.systemUptime - idleRefreshedAt
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.25, 1 - sinceLast), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + IdleRefreshPolicy.delay(sinceLast: sinceLast, fullscreen: frontFullscreen.active), execute: work)
     }
     /// Title changes only update those entries, and arrive in batches: a ticking title costs one filter and
     /// layout per batch at most.
@@ -390,7 +438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// The panel background: Liquid Glass on macOS 26 and later, a popover material before that.
     /// The system turns the glass opaque by itself when Reduce Transparency is on.
-    func materialView<Content: View>(_ hosting: NSHostingView<Content>, frame: NSRect = NSRect(x: 0, y: 0, width: 850, height: 580)) -> NSView {
+    func materialView<Content: View>(_ hosting: NSHostingView<Content>, frame: NSRect = NSRect(x: 0, y: 0, width: 850, height: 580),
+                                     radius: CGFloat = GlanceDesign.panelRadius) -> NSView {
         hosting.sizingOptions = []
         hosting.autoresizingMask = [.width, .height]
         if #available(macOS 26.0, *) {
@@ -398,7 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Regular glass keeps text legible over any desktop; clear glass is meant for photos and video.
             // The panel is a surface, not a control, so it does not react to the pointer.
             glass.style = .regular
-            glass.cornerRadius = GlanceDesign.panelRadius
+            glass.cornerRadius = radius
             glass.autoresizingMask = [.width, .height]
             hosting.frame = glass.bounds
             glass.contentView = hosting
@@ -406,7 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let material = NSVisualEffectView(frame: frame)
         material.material = .popover; material.blendingMode = .behindWindow; material.state = .active
-        material.wantsLayer = true; material.layer?.cornerRadius = GlanceDesign.panelRadius; material.layer?.masksToBounds = true
+        material.wantsLayer = true; material.layer?.cornerRadius = radius; material.layer?.masksToBounds = true
         material.autoresizingMask = [.width, .height]
         hosting.frame = material.bounds
         material.addSubview(hosting)
@@ -452,6 +501,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let row = item(style.label, #selector(setStyle(_:))); row.tag = i; stylesMenu.addItem(row)
         }
         styles.submenu = stylesMenu; menu.addItem(styles)
+        let layoutsItem = NSMenuItem(title: "窗口布局", action: nil, keyEquivalent: "")
+        layoutsItem.submenu = layoutsMenu; menu.addItem(layoutsItem)
         menu.addItem(item("设置与权限…", #selector(openSettings)))
         menu.addItem(item("重新启动一瞥", #selector(relaunch)))
         menu.addItem(.separator())
@@ -484,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         item("菜单栏图标设置…", #selector(openMenuBarSettings)), NSMenuItem.separator()]
         }
         for (offset, entry) in entries.enumerated() { entry.tag = 900; statusMenu.insertItem(entry, at: offset) }
+        fillLayoutsMenu()
         status.menu = statusMenu
         status.button?.performClick(nil)
         status.menu = nil
@@ -509,6 +561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applySettings() {
         settingsModel?.synchronize(settings.value)
+        applyCrashRestart()
         menuBar.configure(settings.value.menuBar)
         dockPreview.configure(settings.value.dockPreview)
         WindowControl.preferWindowServer = settings.value.advanced.focusMethod == .windowServer
@@ -596,7 +649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func show(profile: ShortcutProfile, initialStep: Int, startSearching: Bool = false) {
         showStarted = ProcessInfo.processInfo.systemUptime; firstPreviewRecorded = false
         idleRefresh?.cancel(); idleRefresh = nil
-        capture.cancel(); previewPanel?.orderOut(nil); dockPreview.hide(reason: "switcher")
+        capture.cancel(); previewPanel?.orderOut(nil); dockPreview.hide(reason: "switcher"); notice.hide()
         setSettingsAside()
         state.frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         state.cursor = CGEvent(source: nil)?.location
@@ -611,6 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .dark: panel.appearance = NSAppearance(named: .darkAqua)
         }
         state.expandedApp = nil; state.extraItems = []; state.zoomImage = nil; state.dropTargetID = nil
+        state.ownItems = settingsEntry()
         state.pinnedIDs = pinnedIDs
         state.searchVisible = startSearching
         state.all = engine.cachedSnapshot(); state.query = ""; state.setMessage("")
@@ -674,6 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func diagnostics() -> [String: Any] {
         ["version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
          "permissions": ["accessibility": AXIsProcessTrusted(), "screenCapture": CGPreflightScreenCaptureAccess()],
+         "privateInterfaces": NativeBridge.availability(),
          "timings": RuntimeDiagnostics.shared.summary, "windowCount": engine.windows.count,
          "previewCacheEstimatedBytes": state.previewBytes, "previewCacheLimitBytes": 32 * 1024 * 1024,
          "previewCapturesActive": capture.activeCount, "previewCapturesQueued": capture.queuedCount,
@@ -691,9 +746,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          "windowDiscovery": ["suppressedSurfaces": engine.suppressedSurfaceCount, "unavailableWindowLists": engine.unavailableWindowListCount,
                              "lateScans": engine.lateScanCount, "idleRefreshes": idleRefreshCount],
          "quickRelease": ["atOnce": quickCommitCount, "waited": waitedCommitCount],
+         "windowShortcuts": ["active": settings.value.windowShortcuts.active.count, "lastError": windowShortcutError],
+         "recentOrder": engine.recentOrderCounts,
+         "searchHabits": state.habits.count,
+         "layouts": ["saved": layouts.count, "lastRestore": layoutResult, "restoreOnDisplayChange": settings.value.advanced.restoreLayoutOnScreenChange,
+                     "automaticRestores": automaticLayoutRestores, "displays": knownDisplays.count],
+         "crashRestart": ["armed": CrashRestart.armed, "stopped": crashRestartStopped, "recent": crashRestarts.count],
          "frontFullscreen": frontFullscreen.active, "hoverMonitor": menuBar.hoverMonitorActive,
          "gestureAvoidsSystem": settings.value.advanced.gestureAvoidsSystem,
          "uuFullscreenException": settings.value.advanced.exceptions.contains { $0.matches(bundle: "com.netease.uuremote") && $0.ignore == .fullscreen }]
+    }
+    /// 设置 › 通用 › 复制诊断信息. The numbers and states above, with what tells one Mac's report from another's and
+    /// which features are on. Nothing in it names a window or an app, or holds anything that was typed.
+    func copyDiagnostics() -> Bool {
+        var report = diagnostics()
+        let advanced = settings.value.advanced, dock = settings.value.dockPreview
+        let features: [String: Any] = [
+            "style": settings.value.style.rawValue, "profiles": settings.value.shortcuts.count,
+            "searchApps": advanced.searchApps, "searchSettingsPages": advanced.searchSettingsPages, "searchCommands": advanced.searchCommands,
+            "searchFiles": advanced.searchFiles, "searchCalculator": advanced.searchCalculator, "searchWeb": advanced.searchWeb,
+            "searchLearning": advanced.searchLearning, "searchSkips": advanced.searchSkips, "searchTypos": advanced.searchTypos,
+            "searchPrefixes": advanced.searchPrefixes, "restoreLayoutOnScreenChange": advanced.restoreLayoutOnScreenChange,
+            "shuangpin": advanced.shuangpin.rawValue, "restartAfterCrash": advanced.restartAfterCrash, "commandLine": advanced.commandLineEnabled,
+            "dockPreview": dock.enabled, "dockLiveThumbnails": dock.liveThumbnails, "dockPeekWindow": dock.peekWindow,
+            "menuBar": settings.value.menuBar.enabled, "windowShortcuts": settings.value.windowShortcuts.enabled,
+        ]
+        report["features"] = features
+        report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        report["system"] = ProcessInfo.processInfo.operatingSystemVersionString
+        report["screens"] = NSScreen.screens.map { "\(Int($0.frame.width))x\(Int($0.frame.height))@\(Int($0.backingScaleFactor))x" }
+        report["runningSeconds"] = NSRunningApplication.current.launchDate.map { Int(Date().timeIntervalSince($0)) } ?? -1
+        guard JSONSerialization.isValidJSONObject(report),
+              let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return false }
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.setString(text, forType: .string)
     }
     func preferredScreen(frontPID: Int32?) -> NSScreen? {
         let screens = NSScreen.screens
@@ -914,6 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if state.isDemo { dismiss(); return }
+        recordSearchChoice(selected)
         if selected.descriptor.menuBarItem {
             let id = selected.id
             dismiss()
@@ -921,9 +1009,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if selected.descriptor.launcher != nil {
-            let id = selected.id
+            // Where the panel was, for the note that says what was copied. Taken before it goes.
+            let place: NSRect? = panel.isVisible ? panel.frame : nil
+            let appearance = panel.appearance
             dismiss()
-            if !launcher.open(id) { NSSound.beep() }
+            if !openLauncherItem(selected.descriptor) { NSSound.beep(); return }
+            if selected.descriptor.launcher == .calculation, let answer = selected.descriptor.launchTarget {
+                notice.show(CopyNotice.text(for: answer), symbol: CopyNotice.symbol, around: place, appearance: appearance)
+            }
+            return
+        }
+        if selected.descriptor.settingsWindow {
+            dismiss()
+            bringSettingsForward()
+            moveCursorIfAsked(to: selected)
             return
         }
         if !AXIsProcessTrusted() && selected.browserTab == nil { state.setMessage("请先开启辅助功能权限。", error: true); state.sticky = true; relayout(); return }
@@ -944,11 +1043,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             engine.markFocused(selected)
             guard open else { return }
             dismiss()
-            let mode = state.settings.advanced.followCursor
-            if mode != .never, let rect = selected.descriptor.frame, rect.width > 0,
-               mode == .always || selected.descriptor.displayID.map({ !CGDisplayBounds($0).contains(state.cursor ?? .zero) }) == true {
-                CGWarpMouseCursorPosition(CGPoint(x: rect.x + rect.width / 2, y: rect.y + rect.height / 2))
-            }
+            moveCursorIfAsked(to: selected)
             if let nextTrigger { trigger(index: nextTrigger.index, reverse: nextTrigger.reverse) }
             return
         }
@@ -956,20 +1051,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch FocusFailurePolicy.action(fromCache: fromCache, loading: state.loading) {
         case .waitForFreshList:
             pendingCommit = true; pendingFocusID = selected.id
-            if panelOrderDeferred { panelOrderDeferred = false; orderPanelFront() }
+            showDeferredPanel()
         case .commitFreshList:
             confirm()
+            // The fresh list may hold nothing to switch to, and a panel that stays open has to be seen. It stays
+            // hidden only while another attempt is on its way.
+            if showing, showGeneration == generation, !focusInFlight, !state.actionPending { showDeferredPanel() }
         case .report:
             pendingCommit = false; state.sticky = true; state.setMessage(error, error: true); relayout()
             panelOrderDeferred = false
             orderPanelFront()
         }
+        // A press of the shortcut during the switch was kept for the panel that would open after it. The switch
+        // failed: with another attempt on its way the press waits again, and otherwise it counts now, moving the
+        // selection of the panel that stayed open or opening a new one.
+        if let nextTrigger {
+            if showing, showGeneration == generation, focusInFlight { triggerAfterFocus = nextTrigger }
+            else { trigger(index: nextTrigger.index, reverse: nextTrigger.reverse) }
+        }
     }
-    /// A settings window hidden for the panel is otherwise lost: 一瞥 does not list its own windows.
+    /// The panel whose show delay ran out during a switch, now that the switch will not close it.
+    private func showDeferredPanel() {
+        guard panelOrderDeferred else { return }
+        panelOrderDeferred = false
+        orderPanelFront()
+    }
+    /// 设置 › 鼠标与触控板 › 切换后移动鼠标.
+    private func moveCursorIfAsked(to selected: WindowHandle) {
+        let mode = state.settings.advanced.followCursor
+        if mode != .never, let rect = selected.descriptor.frame, rect.width > 0,
+           mode == .always || selected.descriptor.displayID.map({ !CGDisplayBounds($0).contains(state.cursor ?? .zero) }) == true {
+            CGWarpMouseCursorPosition(CGPoint(x: rect.x + rect.width / 2, y: rect.y + rect.height / 2))
+        }
+    }
+    /// The settings window steps aside while the panel is open, and comes back when it closes.
     func setSettingsAside() {
         guard let window = settingsWindow, window.isVisible else { return }
         settingsSetAside = true; settingsWasKey = window.isKeyWindow
         window.orderOut(nil)
+    }
+    /// The settings window's place in the list, while it is open. Read after it has stepped aside.
+    func settingsEntry() -> [WindowHandle] {
+        guard let window = settingsWindow,
+              SettingsWindowEntry.isOpen(visible: window.isVisible, minimized: window.isMiniaturized, setAside: settingsSetAside) else { return [] }
+        let frame = window.frame
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? frame.maxY
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        let screen = NSScreen.screens.first { $0.frame.contains(center) } ?? window.screen
+        let descriptor = SettingsWindowEntry.descriptor(pid: ProcessInfo.processInfo.processIdentifier, bundleID: Bundle.main.bundleIdentifier ?? "",
+            frame: WindowRect(x: Double(frame.minX), y: Double(primaryHeight - frame.maxY), width: Double(frame.width), height: Double(frame.height)),
+            displayID: (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+            minimized: window.isMiniaturized, isKey: settingsSetAside && settingsWasKey,
+            lastFocused: settingsLastFocused, now: Date.timeIntervalSinceReferenceDate)
+        return [WindowHandle(descriptor: descriptor, ax: nil, icon: NSApp.applicationIconImage)]
+    }
+    /// Chosen from the list: to the front, whichever state it was left in.
+    func bringSettingsForward() {
+        guard let window = settingsWindow else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func returnSettings(cancelled: Bool) {
         guard settingsSetAside, let window = settingsWindow else { return }
@@ -991,7 +1131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             })
         } else { panel.orderOut(nil) }
         previewPanel?.orderOut(nil); capture.cancel(); engine.suspendTracking = false
-        state.zoomImage = nil; state.extraItems = []; state.expandedApp = nil; state.dropTargetID = nil
+        state.zoomImage = nil; state.extraItems = []; state.ownItems = []; state.expandedApp = nil; state.dropTargetID = nil
+        fileSearch.cancel()
         returnSettings(cancelled: cancelled)
         updateHotkeyGate()
         syncActivityTimers()
@@ -1001,6 +1142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // A menu bar result can belong to a system process; it only opens its menu.
         guard !selected.descriptor.menuBarItem else { state.setMessage("菜单栏图标只能打开它的菜单，按 ↩ 即可。"); relayout(); return }
         guard selected.descriptor.launcher == nil else { state.setMessage("按 ↩ 打开它。"); relayout(); return }
+        // Its process is 一瞥 itself, so "quit the app" here would quit the switcher.
+        guard !selected.descriptor.settingsWindow else { state.setMessage("按 ↩ 回到设置窗口，再在那里操作。"); relayout(); return }
         guard !state.loading else { state.setMessage("正在更新窗口，请稍候再操作。"); relayout(); return }
         state.sticky = true
         pendingCommit = false; pendingFocusID = nil
@@ -1026,6 +1169,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .tileRight: feedback = "已把“\(title)”放到右半屏。"
         case .maximize: feedback = "已让“\(title)”填满屏幕。"
         case .nextScreen: feedback = "已把“\(title)”移到下一块屏幕。"
+        case .arrange: feedback = "已调整“\(title)”的位置。"
+        case .restoreFrame: feedback = "已把“\(title)”还原到调整之前的位置。"
         case .focus: feedback = ""
         }
         state.setMessage(feedback); relayout()
@@ -1073,6 +1218,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Changes apply as they are made; the first one in each session backs up the previous settings.
             model.applyHandler = { [weak self] in self?.settings.save($0) }
             model.errorsHandler = { [weak self] in self?.shortcutErrors ?? [] }
+            model.clearHabitsHandler = { [weak self] in self?.clearSearchHabits() }
+            model.copyDiagnosticsHandler = { [weak self] in self?.copyDiagnostics() ?? false }
+            model.layouts = layouts
+            model.saveLayoutHandler = { [weak self] in self?.saveCurrentLayout() }
+            model.restoreLayoutHandler = { [weak self] id in self?.restoreLayout(id) }
+            model.renameLayoutHandler = { [weak self] id in self?.renameLayout(id) }
+            model.deleteLayoutHandler = { [weak self] id in self?.deleteLayout(id) }
             model.beforeFirstApply = { [weak self] in self?.settings.snapshotBackup() }
             settingsModel = model
         }
@@ -1102,6 +1254,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applySettings(); settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func windowWillClose(_ notification: Notification) { recording = false; updateHotkeyGate() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        if (notification.object as? NSWindow) === settingsWindow { settingsLastFocused = Date.timeIntervalSinceReferenceDate }
+    }
     func windowShouldClose(_ sender: NSWindow) -> Bool { sender !== settingsWindow || resolveUnsavedSettings() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         resolveUnsavedSettings() ? .terminateNow : .terminateCancel
@@ -1143,7 +1298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         screen = NSScreen.main; state.profile = ShortcutProfile.defaults()[2]; state.settings = settings.value
         state.style = settings.value.style; state.frontPID = nil; state.displayID = nil; state.loading = false
         state.searchVisible = false
-        state.expandedApp = nil; state.extraItems = []; state.zoomImage = nil; state.pinnedIDs = []; state.badges = [:]
+        state.expandedApp = nil; state.extraItems = []; state.ownItems = []; state.zoomImage = nil; state.pinnedIDs = []; state.badges = [:]
         state.query = ""; state.setMessage(""); state.sticky = true; state.isDemo = true; state.actionPending = false; focusInFlight = false
         pendingCommit = false; pendingFocusID = nil; state.setVisiblePreviews([]); showGeneration += 1
         let examples = [("Safari浏览器", "设计参考与工作资料", "/Applications/Safari.app"), ("访达", "项目文件", "/System/Library/CoreServices/Finder.app"),

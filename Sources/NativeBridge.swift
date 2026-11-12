@@ -6,23 +6,76 @@ private typealias SymbolicHotKeySetter = @convention(c) (UInt32, Bool) -> Int32
 // Looked up ahead of time: a signal handler must not look anything up.
 private var symbolicHotKeySetter: SymbolicHotKeySetter?
 private var systemSwitcherIsOff = false
+// The same for reopening: a crashing process cannot count on allocating anything.
+private var restartArguments: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+private var restartEnvironment: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+private var restartAttributes: UnsafeMutablePointer<posix_spawnattr_t?>?
+private var restartArmed = false
 
 /// Hands the system ⌘Tab back when the process dies without reaching applicationWillTerminate: a crash, `kill`
-/// or Ctrl-C. SIGKILL cannot be caught; the next launch of 一瞥 corrects the state then.
+/// or Ctrl-C, and reopens 一瞥 after a crash when asked to. SIGKILL cannot be caught, which also keeps a force quit
+/// from reopening anything; the next launch of 一瞥 corrects the system ⌘Tab then.
 enum SystemSwitcherGuard {
     static func install() {
-        for number in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
-            signal(number) { received in
-                // Whatever goes wrong from here on, including a hung call, ends the process the ordinary way.
-                signal(received, SIG_DFL)
-                alarm(2)
-                if systemSwitcherIsOff, let setter = symbolicHotKeySetter {
-                    _ = setter(1, true)
-                    _ = setter(2, true)
+        // A stack overflow leaves the thread no room for a handler, so the main thread gets a second stack for it.
+        let size = 128 * 1024
+        var alternate = stack_t()
+        alternate.ss_sp = malloc(size)
+        alternate.ss_size = numericCast(size)
+        sigaltstack(&alternate, nil)
+        let handler: @convention(c) (Int32) -> Void = { received in
+            // Whatever goes wrong from here on, including a hung call, ends the process the ordinary way.
+            signal(received, SIG_DFL)
+            alarm(2)
+            switch received {
+            case SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP:
+                // Before anything that could hang. Being asked to quit (SIGTERM and the like) never reopens.
+                if restartArmed, let arguments = restartArguments, let program = arguments[0] {
+                    restartArmed = false
+                    var child: pid_t = 0
+                    _ = posix_spawn(&child, program, nil, restartAttributes, arguments, restartEnvironment)
                 }
-                raise(received)
+            default: break
             }
+            if systemSwitcherIsOff, let setter = symbolicHotKeySetter {
+                _ = setter(1, true)
+                _ = setter(2, true)
+            }
+            raise(received)
         }
+        for number in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
+            var action = sigaction()
+            action.__sigaction_u.__sa_handler = handler
+            action.sa_flags = SA_ONSTACK
+            sigaction(number, &action, nil)
+        }
+    }
+}
+
+/// What the crash handler above runs. No helper stays running: nothing costs anything until a crash.
+enum CrashRestart {
+    static var armed: Bool { restartArmed }
+    static func arm(appPath: String) {
+        if restartArguments == nil {
+            restartArguments = cStrings(CrashRestartPolicy.command(appPath: appPath))
+            restartEnvironment = cStrings(["PATH=/usr/bin:/bin"])
+            let attributes = UnsafeMutablePointer<posix_spawnattr_t?>.allocate(capacity: 1)
+            attributes.initialize(to: nil)
+            posix_spawnattr_init(attributes)
+            // Its own session, nothing inherited, and no signal left blocked by the handler that starts it.
+            posix_spawnattr_setflags(attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK))
+            var nothing: sigset_t = 0
+            posix_spawnattr_setsigmask(attributes, &nothing)
+            restartAttributes = attributes
+        }
+        restartArmed = true
+    }
+    static func disarm() { restartArmed = false }
+    private static func cStrings(_ strings: [String]) -> UnsafeMutablePointer<UnsafeMutablePointer<CChar>?> {
+        let list = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: strings.count + 1)
+        for (index, string) in strings.enumerated() { (list + index).initialize(to: strdup(string)) }
+        (list + strings.count).initialize(to: nil)
+        return list
     }
 }
 
@@ -107,6 +160,27 @@ enum NativeBridge {
         systemSwitcherIsOff = !enabled
         _ = function(1, enabled)
         _ = function(2, enabled)
+    }
+    /// Locks at once, whatever the password settings say. False when the call is not there to make.
+    static func lockScreen() -> Bool {
+        typealias Lock = @convention(c) () -> Int32
+        guard let function = symbol(dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY), "SACLockScreenImmediate", as: Lock.self) else { return false }
+        return function() == 0
+    }
+    /// Which of the interfaces above this Mac has, by name, for the diagnostics: a false one is a feature on its
+    /// fallback. They are only looked up, never called.
+    static func availability() -> [String: Bool] {
+        let login = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY)
+        func has(_ handle: UnsafeMutableRawPointer?, _ name: String) -> Bool { handle.flatMap { dlsym($0, name) } != nil }
+        var found: [String: Bool] = [:]
+        for name in ["_AXUIElementGetWindow", "GetProcessForPID"] { found[name] = has(accessibility, name) }
+        if found["GetProcessForPID"] == false { found["GetProcessForPID"] = has(dlopen(nil, RTLD_LAZY), "GetProcessForPID") }
+        for name in ["CGSMainConnectionID", "CGSCopySpacesForWindows", "CGSCopyManagedDisplaySpaces", "_SLPSSetFrontProcessWithOptions",
+                     "SLPSPostEventRecordTo", "CGSSetSymbolicHotKeyEnabled", "CGSCopyActiveMenuBarDisplayIdentifier"] {
+            found[name] = has(skyLight, name)
+        }
+        found["SACLockScreenImmediate"] = has(login, "SACLockScreenImmediate")
+        return found
     }
     static func menuBarDisplay() -> String? {
         typealias CopyDisplay = @convention(c) (UInt32) -> Unmanaged<CFString>?

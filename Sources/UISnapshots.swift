@@ -3,11 +3,15 @@ import ScreenCaptureKit
 
 /// A development check for the interface: `Glance --ui-snapshots <folder>` shows each settings page and
 /// the demo panel in light and dark appearance, in front of a plain backdrop, and saves pictures of them.
-/// The capture includes only 一瞥's own windows; nothing else on the screen is recorded.
+/// A settings page longer than its window gets a picture of each screenful.
+/// The capture includes only 一瞥's own windows; nothing else on the screen is recorded. Without Screen Recording,
+/// as on a build machine, each window draws itself into its picture instead: `scripts/ui-snapshots-check.sh`.
 extension AppDelegate {
     private struct SnapshotStep {
         var name: String?
         var prepare: () -> NSWindow?
+        /// Called after each picture: moves on to a part of the same window not yet pictured, and says whether there was one.
+        var more: (() -> Bool)? = nil
     }
 
     func runUISnapshots() {
@@ -19,14 +23,14 @@ extension AppDelegate {
         var steps: [SnapshotStep] = []
         for (dark, suffix) in [(false, "light"), (true, "dark")] {
             steps.append(SnapshotStep(name: nil) { [unowned self] in
-                self.dismiss()
+                self.dismiss(); self.notice.hide()
                 NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 self.panel.appearance = nil; self.settingsWindow?.appearance = nil; self.previewPanel?.appearance = nil
                 Self.saveAppIcon(to: folder.appendingPathComponent("icon-\(suffix).png"))
                 return nil
             })
             for section in SettingsSection.allCases {
-                steps.append(SnapshotStep(name: "settings-\(section.rawValue)-\(suffix)") { [unowned self] in
+                steps.append(SnapshotStep(name: "settings-\(section.rawValue)-\(suffix)", prepare: { [unowned self] in
                     if self.settingsWindow?.isVisible != true { self.openSettings() }
                     // Keep the window active, so the pictures show its active state.
                     self.settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -34,7 +38,9 @@ extension AppDelegate {
                     self.settingsModel?.search = ""; self.settingsModel?.searchTarget = ""
                     self.settingsModel?.selectedTab = section.rawValue
                     return self.settingsWindow
-                })
+                }, more: { [unowned self] in
+                    self.settingsWindow.map { Self.scrollOn($0) } ?? false
+                }))
             }
             for style in SwitcherStyle.allCases {
                 steps.append(SnapshotStep(name: "panel-\(style.rawValue)-\(suffix)") { [unowned self] in
@@ -59,20 +65,44 @@ extension AppDelegate {
                 self.relayout()
                 return self.panel
             })
+            // ">" alone: every system command, and nothing else.
+            steps.append(SnapshotStep(name: "search-prefix-\(suffix)") { [unowned self] in
+                self.state.extraItems = self.launcher.results(apps: false, settingsPages: false, commands: true)
+                self.state.query = ">"
+                self.state.refilter(reset: true)
+                self.relayout()
+                return self.panel
+            })
+            // The note after a calculation's answer is copied, where the panel was. It stays until the next step.
+            steps.append(SnapshotStep(name: "notice-\(suffix)") { [unowned self] in
+                let place: NSRect? = self.panel.isVisible ? self.panel.frame : nil
+                self.dismiss()
+                self.notice.show(CopyNotice.text(for: "1234.5"), symbol: CopyNotice.symbol, around: place, appearance: nil, duration: nil)
+                return self.notice.window
+            })
         }
-        var written: [String] = []
-        func run(_ position: Int) {
+        let canCapture = CGPreflightScreenCaptureAccess()
+        var written: [String] = [], missing: [String] = [], drawn = 0
+        var current: NSWindow?
+        func run(_ position: Int, part: Int) {
             guard position < steps.count else {
-                dismiss(); settingsWindow?.orderOut(nil); backdrop.orderOut(nil)
+                dismiss(); notice.hide(); settingsWindow?.orderOut(nil); backdrop.orderOut(nil)
                 state.query = ""; state.searchVisible = false
                 NSApp.appearance = nil
                 applySettings()
-                try? (written.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("done.txt"), atomically: true, encoding: .utf8)
+                var report = written
+                if drawn > 0 {
+                    report.append("drawn without Screen Recording: \(drawn) of \(written.count). These show each window's own drawing, without glass, shadow or backdrop.")
+                }
+                report += missing.map { "missing: \($0)" }
+                try? (report.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("done.txt"), atomically: true, encoding: .utf8)
                 return
             }
             let step = steps[position]
-            let target = step.prepare()
-            guard let name = step.name, let target else { run(position + 1); return }
+            if part == 1 { current = step.prepare() }
+            guard let base = step.name else { run(position + 1, part: 1); return }
+            let name = part == 1 ? base : "\(base)-\(part)"
+            guard let target = current else { missing.append(name + ".png"); run(position + 1, part: 1); return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                 guard let self else { return }
                 let area = target.frame.insetBy(dx: -40, dy: -40)
@@ -81,14 +111,69 @@ extension AppDelegate {
                 backdrop.order(.below, relativeTo: target.windowNumber)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     let url = folder.appendingPathComponent(name + ".png")
-                    self.captureOwnWindows([backdrop, target], area: area, to: url) { saved in
-                        if saved { written.append(url.lastPathComponent) }
-                        run(position + 1)
+                    let finish: (Bool) -> Void = { captured in
+                        if captured { written.append(url.lastPathComponent) }
+                        else if Self.drawWindow(target, to: url) { written.append(url.lastPathComponent); drawn += 1 }
+                        else { missing.append(url.lastPathComponent) }
+                        if part < 8, step.more?() == true { run(position, part: part + 1) } else { run(position + 1, part: 1) }
                     }
+                    if canCapture { self.captureOwnWindows([backdrop, target], area: area, to: url, completion: finish) } else { finish(false) }
                 }
             }
         }
-        run(0)
+        run(0, part: 1)
+    }
+
+    /// Moves the window's largest scrolling area on by nearly a screenful, for the next picture of a long page.
+    /// False at the end of the page or where nothing scrolls, and the area is then back at its top.
+    private static func scrollOn(_ window: NSWindow) -> Bool {
+        var largest: NSScrollView?
+        func visit(_ view: NSView) {
+            if let scroll = view as? NSScrollView, scroll.frame.width * scroll.frame.height > (largest.map { $0.frame.width * $0.frame.height } ?? 0) { largest = scroll }
+            for inner in view.subviews { visit(inner) }
+        }
+        if let root = window.contentView { visit(root) }
+        guard let scroll = largest, let document = scroll.documentView else { return false }
+        let clip = scroll.contentView, visible = scroll.documentVisibleRect, insets = scroll.contentInsets
+        let flipped = document.isFlipped
+        // The visible part's origin at the two ends of the page. A flipped page counts down from its top.
+        let top = flipped ? document.frame.minY - insets.top : document.frame.maxY + insets.top - visible.height
+        let bottom = flipped ? document.frame.maxY + insets.bottom - visible.height : document.frame.minY - insets.bottom
+        func move(to y: CGFloat) {
+            clip.scroll(to: NSPoint(x: visible.minX, y: y))
+            scroll.reflectScrolledClipView(clip)
+        }
+        let left = flipped ? bottom - visible.minY : visible.minY - bottom
+        guard left > 1 else { move(to: top); return false }
+        // A little less than what shows, so that a row cut by one picture is whole in the next.
+        let step = min(max(visible.height - insets.top - insets.bottom - 48, 48), left)
+        move(to: flipped ? visible.minY + step : visible.minY - step)
+        guard abs(scroll.documentVisibleRect.minY - visible.minY) > 1 else { move(to: top); return false }
+        return true
+    }
+
+    /// The window as it draws itself, frame and contents, on the window's own background colour. It stands in for a
+    /// capture of the screen where there is no permission to make one.
+    private static func drawWindow(_ window: NSWindow, to url: URL) -> Bool {
+        guard let view = window.contentView?.superview ?? window.contentView else { return false }
+        let bounds = view.bounds
+        guard bounds.width >= 1, bounds.height >= 1, let cached = view.bitmapImageRepForCachingDisplay(in: bounds) else { return false }
+        view.cacheDisplay(in: bounds, to: cached)
+        guard let flat = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: cached.pixelsWide, pixelsHigh: cached.pixelsHigh, bitsPerSample: 8, samplesPerPixel: 4,
+                                          hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return false }
+        // In points before the context is made, so that drawing in points fills every pixel.
+        flat.size = bounds.size
+        let area = NSRect(origin: .zero, size: bounds.size)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: flat)
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSColor.windowBackgroundColor.setFill()
+            NSBezierPath(rect: area).fill()
+        }
+        _ = cached.draw(in: area)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = flat.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: url)) != nil
     }
 
     /// The app icon as Finder shows it, at 512 pixels, in the current appearance.

@@ -48,6 +48,10 @@ jobs:
       - name: Build and run the core checks
         run: ./build.sh
 
+      # Read, not judged: times on a shared machine vary too much to fail a build over.
+      - name: Time the search
+        run: ./scripts/search-benchmark.sh search-benchmark.json
+
       # build.sh only prints a note when the Liquid Glass icon fails to compile, and carries on.
       - name: Check the Liquid Glass icon
         run: test -f Glance.app/Contents/Resources/Assets.car
@@ -60,4 +64,22 @@ jobs:
         with:
           name: Glance-${{ github.sha }}
           path: Glance.zip
+          retention-days: 7
+
+      # The steps from here on run the built app. After the upload, so a failure here still leaves the build to look at.
+      - name: Check that a crash reopens the app
+        run: ./scripts/crash-restart-check.sh
+
+      # Opens every settings page and the panel and saves a picture of each. A page that crashes or hangs the app fails here.
+      - name: Check that every settings page and the panel can be drawn
+        run: ./scripts/ui-snapshots-check.sh
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: Checks-${{ github.sha }}
+          path: |
+            ui-snapshots/
+            search-benchmark.json
+          if-no-files-found: ignore
           retention-days: 7

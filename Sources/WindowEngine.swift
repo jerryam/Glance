@@ -128,6 +128,12 @@ final class WindowEngine: ObservableObject {
     private var queuedFrontPID: Int32?
     private var focusHistory: [String: TimeInterval] = [:]
     private var appHistory: [Int32: TimeInterval] = [:]
+    /// Each app's last use by identifier, which outlives the process ids in appHistory.
+    private var appRecent: [String: TimeInterval] = [:]
+    /// What is saved. Nil until restoreRecentOrder has run, and nothing is written before that.
+    private var savedRecent: RecentOrder?
+    private var recentSave: DispatchWorkItem?
+    private var restoredWindowCount = 0
     private var lastTracked = ""
     private var firstSeen: [String: TimeInterval] = [:]
     /// Subscribing to an app and reading its focused window can each wait for that app, and the app may not be
@@ -144,6 +150,12 @@ final class WindowEngine: ObservableObject {
     private(set) var suppressedSurfaceCount = 0
     private(set) var unavailableWindowListCount = 0
     private(set) var lateScanCount = 0
+    /// Which read each app's windows came from, so an answer that arrives late never replaces a newer one.
+    private var scanLedger = ScanLedger()
+    /// Every window number the window server had at the last read, whatever its layer or size.
+    private(set) var liveWindowIDs = Set<UInt32>()
+    /// The last answer about a focused window that came from the app itself, and when.
+    private var focusRead: (pid: Int32, fullscreen: Bool, at: TimeInterval)?
     /// Window and app events so far, and how many of them the last finished read could have seen.
     private var cacheEvents = 0
     private var cacheEventsRead = 0
@@ -175,7 +187,10 @@ final class WindowEngine: ObservableObject {
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             if !self.suspendTracking && app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-                self.appHistory[app.processIdentifier] = Date.timeIntervalSinceReferenceDate
+                let now = Date.timeIntervalSinceReferenceDate
+                self.appHistory[app.processIdentifier] = now
+                if let bundle = app.bundleIdentifier { self.appRecent[bundle] = now }
+                self.noteRecentUse()
             }
             self.watchApplications()
             self.trackFocus()
@@ -248,7 +263,14 @@ final class WindowEngine: ObservableObject {
             return
         }
         if notification == kAXUIElementDestroyedNotification {
+            for handle in windows where handle.ax.map({ CFEqual($0, window) }) == true {
+                if let id = handle.descriptor.windowID { WindowControl.forgetFrame(of: id) }
+            }
+            let listed = windows.count
             windows.removeAll { handle in handle.ax.map { CFEqual($0, window) } == true }
+            // A read under way may still hold the closed window and put it back, and an app left without windows gets
+            // an entry of its own only from a read. Other elements report this too, and those change nothing here.
+            if windows.count != listed { markCacheStale() }
             axThread.perform { [weak self] in
                 guard let self else { return }
                 for pid in Array(self.watchedWindows.keys) { self.watchedWindows[pid]?.removeAll { CFEqual($0, window) } }
@@ -369,6 +391,7 @@ final class WindowEngine: ObservableObject {
         return (key, (axAttribute(window, "AXFullScreen") as? NSNumber)?.boolValue ?? false)
     }
     private func applyFocus(pid: Int32, key: String?, fullscreen: Bool, frozen: Bool) {
+        if key != nil { focusRead = (pid: pid, fullscreen: fullscreen, at: ProcessInfo.processInfo.systemUptime) }
         let foreground = "\(pid):\(fullscreen)"
         if foreground != lastForeground { lastForeground = foreground; onForegroundChange?() }
         // Freeze MRU while selecting, but continue detecting remote fullscreen changes.
@@ -376,8 +399,14 @@ final class WindowEngine: ObservableObject {
         guard key != lastTracked else { return }
         lastTracked = key
         focusHistory[key] = Date.timeIntervalSinceReferenceDate
+        noteRecentUse()
         // Focus landed on a window the list has never seen, whichever event was missed.
         if key.hasPrefix("cg:"), !windows.contains(where: { $0.id == key }) { markCacheStale() }
+    }
+    /// Whether this app's focused window is full screen, when the app said so a moment ago. Nil when it has to be asked.
+    func recentFullscreen(of pid: Int32) -> Bool? {
+        guard let read = focusRead, read.pid == pid, ProcessInfo.processInfo.systemUptime - read.at <= 0.3 else { return nil }
+        return read.fullscreen
     }
     func refresh(frontPID: Int32?, completion: @escaping ([WindowHandle]) -> Void) {
         let request = refreshRequests.append(completion)
@@ -397,9 +426,11 @@ final class WindowEngine: ObservableObject {
     }
     /// The answer of an app that missed the deadline. The next refresh starts from it, and an open panel
     /// hears about it only when the app's windows really changed, so a slow app cannot keep it refreshing.
-    private func adoptLateScan(pid: Int32, handles: [WindowHandle]) {
+    private func adoptLateScan(pid: Int32, handles: [WindowHandle], read: Int) {
         lateScanCount += 1
         guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        // A later read has heard from this app since, and what it found is newer.
+        guard scanLedger.adoptLate(pid: pid, from: read) else { return }
         let before = Set(windows.filter { $0.descriptor.pid == pid }.map(\.id))
         windows = windows.filter { $0.descriptor.pid != pid } + handles
         for handle in handles where firstSeen[handle.id] == nil { firstSeen[handle.id] = handle.descriptor.created }
@@ -416,6 +447,7 @@ final class WindowEngine: ObservableObject {
         let start = ProcessInfo.processInfo.systemUptime
         refreshing = true
         let eventsBeforeRead = cacheEvents
+        let read = scanLedger.begin(), ledgerMark = scanLedger.mark
         let trusted = AXIsProcessTrusted()
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier != ownPID }.map {
@@ -425,9 +457,10 @@ final class WindowEngine: ObservableObject {
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return (id.uint32Value, CGDisplayBounds(id.uint32Value))
         }
-        let history = focusHistory, activated = appHistory, firstSeen = self.firstSeen, scanTabs = self.scanTabs, known = windows
+        let history = focusHistory, activated = appHistory, appTimes = appRecent, firstSeen = self.firstSeen, scanTabs = self.scanTabs, known = windows
         worker.async { [weak self] in
             let dictionaries = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let everyWindow = Set(dictionaries.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
             let entries: [CGEntry] = dictionaries.compactMap { d in
                 guard (d[kCGWindowLayer as String] as? Int ?? 1) == 0,
                       let id = d[kCGWindowNumber as String] as? UInt32,
@@ -448,7 +481,7 @@ final class WindowEngine: ObservableObject {
                 d.spaceKnown = !d.spaces.isEmpty
                 d.spaceNumbers = d.spaces.compactMap { spaces.numbers[$0] }
                 d.created = firstSeen[d.id] ?? Date.timeIntervalSinceReferenceDate
-                d.lastFocused = history[d.id] ?? history["\(d.pid)|\(d.title)"] ?? activated[d.pid] ?? 0
+                d.lastFocused = RecentOrderPolicy.lastFocused(d, focus: history, activated: activated, apps: appTimes)
                 d.controllable = ax != nil || d.windowless
                 d.zOrder = d.windowID.flatMap { cgOrder[$0] } ?? Int.max
                 return d
@@ -546,15 +579,18 @@ final class WindowEngine: ObservableObject {
                 DispatchQueue.concurrentPerform(iterations: apps.count) { index in
                     let scanned = scan(apps[index])
                     if !slots.store(scanned, at: index) && !scanned.timedOut {
-                        DispatchQueue.main.async { [weak self] in self?.adoptLateScan(pid: apps[index].pid, handles: scanned.handles) }
+                        DispatchQueue.main.async { [weak self] in self?.adoptLateScan(pid: apps[index].pid, handles: scanned.handles, read: read) }
                     }
                 }
                 finished.leave()
             }
             _ = finished.wait(timeout: .now() + Self.scanDeadline)
             let answers = slots.close()
+            var answered = Set<Int32>(), unanswered = Set<Int32>()
             for (index, app) in apps.enumerated() {
-                let scanned = answers[index].flatMap { $0.timedOut ? nil : $0 } ?? lastKnown(app)
+                let inTime: AppScan? = answers[index].flatMap { $0.timedOut ? nil : $0 }
+                if inTime == nil { unanswered.insert(app.pid) } else { answered.insert(app.pid) }
+                let scanned = inTime ?? lastKnown(app)
                 handles += scanned.handles
                 if currentID == nil { currentID = scanned.currentID }
                 suppressedSurfaces += scanned.suppressed; unavailableWindowLists += scanned.unavailable
@@ -564,7 +600,7 @@ final class WindowEngine: ObservableObject {
                 let old = handles[index]; var d = old.descriptor; d.lastFocused = Date.timeIntervalSinceReferenceDate
                 handles[index] = WindowHandle(descriptor: d, ax: old.ax, icon: old.icon, tab: old.tab)
             }
-            handles.sort { a, b in
+            let inOrder: (WindowHandle, WindowHandle) -> Bool = { a, b in
                 if a.descriptor.windowless != b.descriptor.windowless { return !a.descriptor.windowless }
                 if a.id == front { return b.id != front }
                 if b.id == front { return false }
@@ -575,9 +611,17 @@ final class WindowEngine: ObservableObject {
                 if ai != bi { return ai < bi }
                 return a.id < b.id
             }
-            let result = handles
+            handles.sort(by: inOrder)
+            let sorted = handles, answeredApps = answered, unansweredApps = unanswered
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // An app that missed the deadline may have answered while this read was still under way. Its answer
+                // is in the list already, and is newer than the copy this read fell back on. It takes its place in
+                // the same order as the rest.
+                let late = self.scanLedger.finish(read: read, answered: answeredApps, unanswered: unansweredApps, since: ledgerMark,
+                                                  running: Set(apps.map(\.pid)))
+                let result = late.isEmpty ? sorted : Self.keeping(late, from: self.windows, in: sorted).sorted(by: inOrder)
+                self.liveWindowIDs = everyWindow
                 let ids = Set(result.map(\.id))
                 self.firstSeen = self.firstSeen.filter { ids.contains($0.key) }
                 for handle in result where self.firstSeen[handle.id] == nil { self.firstSeen[handle.id] = handle.descriptor.created }
@@ -598,6 +642,10 @@ final class WindowEngine: ObservableObject {
             }
         }
     }
+    /// The list a read produced, with the windows of `apps` taken from the current list instead.
+    private static func keeping(_ apps: Set<Int32>, from current: [WindowHandle], in read: [WindowHandle]) -> [WindowHandle] {
+        read.filter { !apps.contains($0.descriptor.pid) } + current.filter { apps.contains($0.descriptor.pid) }
+    }
     private static func matchScore(_ cg: CGEntry, title: String, frame: CGRect) -> Double {
         let delta = abs(cg.frame.minX - frame.minX) + abs(cg.frame.minY - frame.minY) + abs(cg.frame.width - frame.width) + abs(cg.frame.height - frame.height)
         return Double(delta) + ((!title.isEmpty && !cg.title.isEmpty && cg.title != title) ? 1000 : 0)
@@ -605,6 +653,43 @@ final class WindowEngine: ObservableObject {
     func markFocused(_ handle: WindowHandle) {
         let key = handle.id
         focusHistory[key] = Date.timeIntervalSinceReferenceDate; lastTracked = key
+        noteRecentUse()
+    }
+
+    // MARK: Recent order across restarts
+
+    /// Kept apart from the settings, so it is not part of a settings export.
+    static let recentOrderKey = "WindowHop.recentOrder.v1"
+    /// Once at launch, before the first read of the windows.
+    func restoreRecentOrder() {
+        let order = RecentOrderPolicy.decoded(UserDefaults.standard.data(forKey: Self.recentOrderKey))
+        let now = Date.timeIntervalSinceReferenceDate
+        var running: [Int32: String] = [:]
+        for app in NSWorkspace.shared.runningApplications where !app.isTerminated { running[app.processIdentifier] = app.bundleIdentifier ?? "" }
+        let focus = RecentOrderPolicy.restoredFocus(order, runningApps: running, now: now)
+        restoredWindowCount = focus.count
+        focusHistory.merge(focus) { current, _ in current }
+        appRecent.merge(RecentOrderPolicy.restoredApps(order, now: now)) { current, _ in current }
+        savedRecent = order
+    }
+    /// One timer at a time and none while nothing changes, so an idle 一瞥 stays idle.
+    private func noteRecentUse() {
+        guard savedRecent != nil, recentSave == nil else { return }
+        let work = DispatchWorkItem { [weak self] in self?.saveRecentOrder() }
+        recentSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + RecentOrderPolicy.saveDelay, execute: work)
+    }
+    func saveRecentOrder() {
+        recentSave?.cancel(); recentSave = nil
+        guard let previous = savedRecent else { return }
+        let order = RecentOrderPolicy.snapshot(focus: focusHistory, windows: windows.map(\.descriptor), apps: appRecent, previous: previous)
+        appRecent = order.apps
+        guard order != previous, let data = try? JSONEncoder().encode(order) else { return }
+        savedRecent = order
+        UserDefaults.standard.set(data, forKey: Self.recentOrderKey)
+    }
+    var recentOrderCounts: [String: Int] {
+        ["restoredWindows": restoredWindowCount, "savedWindows": savedRecent?.windows.count ?? 0, "savedApps": savedRecent?.apps.count ?? 0]
     }
 }
 
@@ -727,7 +812,18 @@ final class PreviewCapture {
     }
 }
 
-enum WindowAction { case focus, close, minimize, fullscreen, quitApp, hideApp, tileLeft, tileRight, maximize, nextScreen }
+enum WindowAction: Equatable {
+    case focus, close, minimize, fullscreen, quitApp, hideApp, tileLeft, tileRight, maximize, nextScreen
+    case arrange(WindowArrangement.Kind), restoreFrame
+}
+extension WindowLayoutCommand {
+    /// The same command for the window selected in the panel. Moving to the next screen is the panel's own
+    /// command, which says so when it is done.
+    var action: WindowAction {
+        if self == .nextScreen { return .nextScreen }
+        return kind.map { WindowAction.arrange($0) } ?? .restoreFrame
+    }
+}
 enum WindowControl {
     /// 设置 › 通用 › 切换窗口的方式. The window-server path falls back automatically when unavailable.
     static var preferWindowServer = true
@@ -741,6 +837,50 @@ enum WindowControl {
             DispatchQueue.main.async { completion(error) }
         }
     }
+    /// For a global shortcut: the window its app has focused. Asking may wait for that app, so this runs on the
+    /// action queue like any other action. The answer arrives on the main queue.
+    static func performOnFocusedWindow(_ command: WindowLayoutCommand, of pid: Int32, completion: @escaping (String?) -> Void) {
+        let screens = screenAreas()
+        actionQueue.async {
+            let error = applyToFocusedWindow(command, of: pid, screens: screens)
+            DispatchQueue.main.async { completion(error) }
+        }
+    }
+    private static func applyToFocusedWindow(_ command: WindowLayoutCommand, of pid: Int32, screens: [WindowRect]) -> String? {
+        guard AXIsProcessTrusted() else { return "请先为“一瞥”开启辅助功能权限。" }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)
+        guard let focused = axAttribute(app, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return "当前应用没有可以调整的窗口。" }
+        let window = focused as! AXUIElement
+        AXUIElementSetMessagingTimeout(window, 0.15)
+        if let kind = command.kind { return arrange(window, kind, screens: screens) }
+        return restoreFrame(window, screens: screens)
+    }
+    /// Puts windows where a saved layout has them, one after another. How many it placed arrives on the main queue.
+    static func restoreLayout(_ placements: [(handle: WindowHandle, frame: WindowRect)], completion: @escaping (Int) -> Void) {
+        actionQueue.async {
+            let placed = placements.filter { moveForLayout($0.handle, to: $0.frame) == nil }.count
+            DispatchQueue.main.async { completion(placed) }
+        }
+    }
+    private static func moveForLayout(_ handle: WindowHandle, to target: WindowRect) -> String? {
+        guard let app = NSRunningApplication(processIdentifier: handle.descriptor.pid), let ax = element(for: handle) else { return "这个窗口已经关闭。" }
+        AXUIElementSetMessagingTimeout(ax, 0.15)
+        if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
+        if app.isHidden { app.unhide() }
+        if (axAttribute(ax, kAXMinimizedAttribute) as? NSNumber)?.boolValue == true {
+            AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        let current = axFrame(ax).map { windowRect($0) }
+        if let error = place(ax, at: target) { return error }
+        // So that 还原 can take a window back from a layout, as it can from any other arrangement.
+        if let window = NativeBridge.windowID(ax), let current {
+            let applied = axFrame(ax).map { windowRect($0) } ?? target
+            let pid = ownerPID(ax)
+            withFrameMemory { $0.recordArrangement(of: window, owner: pid, from: current, to: applied) }
+        }
+        return nil
+    }
     /// Only the main thread may give up activation. It never waits for the action queue, so this cannot deadlock.
     private static func yieldActivation(to app: NSRunningApplication) {
         if Thread.isMainThread { NSApp.yieldActivation(to: app) }
@@ -753,6 +893,19 @@ enum WindowControl {
         if let id = handle.descriptor.windowID, let match = windows.first(where: { NativeBridge.windowID($0) == id }) { return match }
         let matches = windows.filter { (axAttribute($0, kAXTitleAttribute) as? String) == handle.descriptor.title }
         return matches.count == 1 ? matches[0] : nil
+    }
+    /// The element the app has for this window now, by window number alone: a title may belong to another window.
+    private static func currentElement(for handle: WindowHandle) -> AXUIElement? {
+        guard let id = handle.descriptor.windowID else { return nil }
+        let app = AXUIElementCreateApplication(handle.descriptor.pid); AXUIElementSetMessagingTimeout(app, 0.2)
+        let windows = axAttribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        return windows.first(where: { NativeBridge.windowID($0) == id })
+    }
+    /// Whether the window server still has a window with this number. It reads every window, so it is asked only
+    /// when an element has gone and the app lists nothing in its place.
+    private static func windowServerHas(_ id: UInt32) -> Bool {
+        let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+        return info.contains { $0[kCGWindowNumber as String] as? UInt32 == id }
     }
     /// A browser switches tabs in a script that runs in another process, so the answer arrives later: nil when
     /// the tab is in front, otherwise what to tell the user. Always on the main queue.
@@ -772,11 +925,32 @@ enum WindowControl {
         if action == .hideApp { return (app.isHidden ? app.unhide() : app.hide()) ? nil : "应用没有接受隐藏或显示请求。" }
         if handle.browserTab != nil { return "浏览器标签页请先切换过去，再在浏览器里操作。" }
         guard AXIsProcessTrusted() else { return "请先为“一瞥”开启辅助功能权限。" }
-        let ax = element(for: handle)
+        var ax = element(for: handle)
         if let ax { AXUIElementSetMessagingTimeout(ax, 0.15) }
         if action == .focus {
             // Reject an unbound surface before yielding key focus to another application.
             if !handle.descriptor.windowless && ax == nil { return "这个窗口已关闭或暂时不可切换，请重新选择。" }
+            // The list may be a moment old, and the window may have closed since. Its element says so in the same
+            // answer that tells whether it is minimized. The window server takes a closed window's number without
+            // complaint, and then nothing comes to the front. An app that does not answer is not held against the
+            // window: the window server can still bring it forward.
+            var minimized = false
+            if let listed = ax {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(listed, kAXMinimizedAttribute as CFString, &value) == .invalidUIElement {
+                    value = nil
+                    if let again = currentElement(for: handle) {
+                        // The app made a new element for a window that is still there.
+                        AXUIElementSetMessagingTimeout(again, 0.15)
+                        ax = again
+                        value = axAttribute(again, kAXMinimizedAttribute)
+                    } else {
+                        let known = handle.descriptor.windowID.map { windowServerHas($0) } ?? false
+                        if !known { return "这个窗口已经关闭，请重新选择。" }
+                    }
+                }
+                minimized = (value as? NSNumber)?.boolValue == true
+            }
             app.unhide()
             if handle.descriptor.windowless, let url = app.bundleURL {
                 yieldActivation(to: app)
@@ -786,8 +960,7 @@ enum WindowControl {
                 AXUIElementSetMessagingTimeout(tab, 0.15)
                 if AXUIElementPerformAction(tab, kAXPressAction as CFString) != .success { return "这个标签页已变化，请重新打开切换面板。" }
             }
-            if let ax, (axAttribute(ax, kAXMinimizedAttribute) as? NSNumber)?.boolValue == true,
-               AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success {
+            if let ax, minimized, AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success {
                 return "这个窗口暂时无法还原。"
             }
             if preferWindowServer, let windowID = handle.descriptor.windowID,
@@ -829,6 +1002,8 @@ enum WindowControl {
         case .tileRight: return arrange(ax, .right, screens: screens)
         case .maximize: return arrange(ax, .maximize, screens: screens)
         case .nextScreen: return arrange(ax, .nextScreen, screens: screens)
+        case .arrange(let kind): return arrange(ax, kind, screens: screens)
+        case .restoreFrame: return restoreFrame(ax, screens: screens)
         }
         return result == .success ? nil : "该应用暂不支持这个窗口操作（\(result.rawValue)）。"
     }
@@ -844,10 +1019,49 @@ enum WindowControl {
     private static func arrange(_ ax: AXUIElement, _ kind: WindowArrangement.Kind, screens: [WindowRect]?) -> String? {
         if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
         guard let frame = axFrame(ax) else { return "暂时读不到这个窗口的位置。" }
-        let current = WindowRect(x: Double(frame.minX), y: Double(frame.minY), width: Double(frame.width), height: Double(frame.height))
+        let current = windowRect(frame)
         guard let target = WindowArrangement.frame(kind, window: current, screens: screens ?? screenAreas()) else {
             return kind == .nextScreen ? "只有一块屏幕，无法移到下一块屏幕。" : "没有找到可用的屏幕。"
         }
+        if let error = place(ax, at: target) { return error }
+        if let window = NativeBridge.windowID(ax) {
+            // Where the window really ended up, since an app may round to its own grid: a later difference means the user moved it.
+            let applied = axFrame(ax).map { windowRect($0) } ?? target
+            let pid = ownerPID(ax)
+            withFrameMemory { $0.recordArrangement(of: window, owner: pid, from: current, to: applied) }
+        }
+        return nil
+    }
+    private static func restoreFrame(_ ax: AXUIElement, screens: [WindowRect]?) -> String? {
+        if (axAttribute(ax, "AXFullScreen") as? NSNumber)?.boolValue == true { return "全屏窗口不能调整位置，请先退出全屏。" }
+        let pid = ownerPID(ax)
+        guard let window = NativeBridge.windowID(ax), let saved = withFrameMemory({ $0.original(of: window, owner: pid) }) else {
+            return "这个窗口没有可还原的位置：一瞥还没有调整过它。"
+        }
+        let current = axFrame(ax).map { windowRect($0) } ?? saved
+        if let error = place(ax, at: WindowArrangement.restored(saved, window: current, screens: screens ?? screenAreas())) { return error }
+        withFrameMemory { $0.forget(window) }
+        return nil
+    }
+    /// Arrangements run on the action queue, and `perform` may also be called from the main thread.
+    private static var frameMemory = WindowFrameMemory()
+    private static let frameMemoryLock = NSLock()
+    private static func withFrameMemory<T>(_ body: (inout WindowFrameMemory) -> T) -> T {
+        frameMemoryLock.lock(); defer { frameMemoryLock.unlock() }
+        return body(&frameMemory)
+    }
+    /// A closed window's number may go to a new window later, which must not inherit its place.
+    static func forgetFrame(of window: UInt32) { withFrameMemory { $0.forget(window) } }
+    /// The process a window belongs to. It comes from the element itself, so this does not wait for the app.
+    private static func ownerPID(_ ax: AXUIElement) -> Int32 {
+        var pid: Int32 = 0
+        AXUIElementGetPid(ax, &pid)
+        return pid
+    }
+    private static func windowRect(_ frame: CGRect) -> WindowRect {
+        WindowRect(x: Double(frame.minX), y: Double(frame.minY), width: Double(frame.width), height: Double(frame.height))
+    }
+    private static func place(_ ax: AXUIElement, at target: WindowRect) -> String? {
         var origin = CGPoint(x: target.x, y: target.y)
         var size = CGSize(width: target.width, height: target.height)
         guard let position = AXValueCreate(.cgPoint, &origin), let dimension = AXValueCreate(.cgSize, &size) else { return "无法设置窗口位置。" }
